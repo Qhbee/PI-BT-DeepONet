@@ -1,0 +1,7 @@
+[project]
+name = "PI-BT-DeepONet"
+version = "0.1.0"
+description = "Physics-informed Bayesian Transformer Deep Operator Network"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
