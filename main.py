@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from src.models import DeepONet, FNNBranch, FNNTrunk
+from src.models import DeepONet, FNNBranch, FNNTrunk, TransformerBranch
 from src.data.generators.antiderivative import generate_antiderivative_data
 from src.training.trainer import train_antiderivative
 
@@ -24,10 +24,23 @@ def main():
     num_sensors = model_cfg.get("num_sensors", 100)
     coord_dim = model_cfg.get("coord_dim", 1)
     output_dim = model_cfg.get("output_dim", 40)
+    branch_type = model_cfg.get("branch_type", "fnn")
     branch_hidden = model_cfg.get("branch_hidden", [40, 40])
     trunk_hidden = model_cfg.get("trunk_hidden", [40, 40])
 
-    branch = FNNBranch(num_sensors, branch_hidden, output_dim)
+    if branch_type == "transformer":
+        print(f"Using TransformerBranch (d_model={model_cfg.get('transformer_d_model', 32)}, nhead={model_cfg.get('transformer_nhead', 4)})")
+        branch = TransformerBranch(
+            num_sensors,
+            output_dim,
+            d_model=model_cfg.get("transformer_d_model", 32),
+            nhead=model_cfg.get("transformer_nhead", 4),
+            num_layers=model_cfg.get("transformer_num_layers", 2),
+            dropout=model_cfg.get("transformer_dropout", 0.1),
+        )
+    else:
+        print("Using FNNBranch")
+        branch = FNNBranch(num_sensors, branch_hidden, output_dim)
     trunk = FNNTrunk(coord_dim, trunk_hidden, output_dim)
     model = DeepONet(branch, trunk, output_dim, bias=True)
 
