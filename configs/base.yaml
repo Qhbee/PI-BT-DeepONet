@@ -1,0 +1,14 @@
+# Base config for PI-BT-DeepONet (快速迭代：小规模)
+model:
+  branch_type: fnn
+  trunk_type: fnn
+  branch_hidden: [20, 20]
+  trunk_hidden: [20, 20]
+  output_dim: 20
+  num_sensors: 50
+  coord_dim: 1
+
+training:
+  lr: 0.001
+  epochs: 20
+  batch_size: 64

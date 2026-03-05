@@ -11,6 +11,7 @@ dependencies = [
     "pyyaml",
     "tensorboard",
     "matplotlib",
+    "tqdm",
 ]
 
 [tool.uv]

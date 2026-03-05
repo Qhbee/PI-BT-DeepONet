@@ -12,3 +12,6 @@ wheels/
 # IDE
 .idea/
 .vscode/
+
+# Experiments
+experiments/
