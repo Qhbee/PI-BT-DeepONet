@@ -29,6 +29,7 @@ def main():
 
     model_cfg = config.get("model", {})
     train_cfg = config.get("training", {})
+    physics_cfg = config.get("physics", {})
 
     num_sensors = model_cfg.get("num_sensors", 100)
     coord_dim = model_cfg.get("coord_dim", 1)
@@ -122,6 +123,11 @@ def main():
         mc_samples=train_cfg.get("mc_samples", 3),
         eval_mc_samples=train_cfg.get("eval_mc_samples", 20),
         kl_weight=train_cfg.get("kl_weight"),
+        pi_constraint=physics_cfg.get("pi_constraint", "none"),
+        pi_weight=physics_cfg.get("pi_weight", 0.0),
+        bc_weight=physics_cfg.get("bc_weight", 0.0),
+        ic_weight=physics_cfg.get("ic_weight", 0.0),
+        n_collocation=physics_cfg.get("n_collocation", 256),
     )
     print("Done.")
 

@@ -16,6 +16,13 @@ model:
   transformer_num_layers: 2
   transformer_dropout: 0.1
 
+physics:
+  pi_constraint: none  # none | antiderivative
+  pi_weight: 0.0       # PDE residual weight
+  bc_weight: 0.0       # explicit boundary-condition loss weight (antiderivative: s(0)=0)
+  ic_weight: 0.0       # explicit initial-condition loss weight (same anchor as BC for antiderivative)
+  n_collocation: 256  # per-batch collocation points when pi_constraint != none
+
 training:
   lr: 0.001
   epochs: 20

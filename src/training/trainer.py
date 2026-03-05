@@ -8,6 +8,8 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 
+from src.physics import compute_residual
+
 
 def _alpha_divergence(log_prior: torch.Tensor, log_variational: torch.Tensor, alpha: float) -> torch.Tensor:
     """Compute alpha-divergence term; alpha=1 reduces to KL."""
@@ -24,6 +26,25 @@ def _gaussian_nll(pred_mean: torch.Tensor, pred_std: torch.Tensor, target: torch
     return -dist.log_prob(target).mean()
 
 
+def _antiderivative_anchor_loss(
+    model: nn.Module,
+    u_batch: torch.Tensor,
+    anchor: float,
+    bayes_method: str,
+    mse: nn.Module,
+) -> torch.Tensor:
+    """
+    Enforce antiderivative anchor condition at x=0 (s(0)=0).
+    For this ODE, IC and left-BC are equivalent and use the same anchor.
+    """
+    y_anchor = torch.full((u_batch.shape[0], 1), anchor, device=u_batch.device, dtype=u_batch.dtype)
+    if bayes_method == "alpha_vi":
+        pred_anchor, _, _, _ = model(u_batch, y_anchor, sample=False)
+    else:
+        pred_anchor = model(u_batch, y_anchor)
+    return mse(pred_anchor, torch.zeros_like(pred_anchor))
+
+
 def train_antiderivative(
     model: nn.Module,
     data: dict,
@@ -38,6 +59,11 @@ def train_antiderivative(
     mc_samples: int = 3,
     eval_mc_samples: int = 20,
     kl_weight: float | None = None,
+    pi_constraint: str = "none",
+    pi_weight: float = 0.0,
+    bc_weight: float = 0.0,
+    ic_weight: float = 0.0,
+    n_collocation: int = 256,
 ):
     """Train DeepONet on antiderivative data."""
     if uq_mode is not None:
@@ -54,6 +80,7 @@ def train_antiderivative(
     u_test = torch.from_numpy(data["u_test"])
     y_test = torch.from_numpy(data["y_test"])
     s_test = torch.from_numpy(data["s_test"])
+    x_sensors = torch.from_numpy(data["x_sensors"]) if "x_sensors" in data else None
 
     n_train = u_train.shape[0]
     n_points = y_train.shape[1]
@@ -70,6 +97,14 @@ def train_antiderivative(
     log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir)
 
+    use_pde = pi_constraint != "none" and pi_weight > 0 and x_sensors is not None
+    use_bc = pi_constraint == "antiderivative" and bc_weight > 0
+    use_ic = pi_constraint == "antiderivative" and ic_weight > 0
+    if (bc_weight > 0 or ic_weight > 0) and pi_constraint != "antiderivative":
+        raise ValueError("Explicit BC/IC losses are currently implemented for pi_constraint='antiderivative' only.")
+    domain_min = float(x_sensors[0]) if x_sensors is not None else 0.0
+    domain_max = float(x_sensors[-1]) if x_sensors is not None else 1.0
+
     last_metrics = {"loss": float("nan"), "rel_l2": float("nan"), "test_mse": float("nan")}
     pbar = tqdm(range(epochs), desc="Training", ncols=120, miniters=0.1, maxinterval=5)
     for epoch in pbar:
@@ -78,6 +113,9 @@ def train_antiderivative(
         epoch_loss = 0.0
         epoch_nll = 0.0
         epoch_div = 0.0
+        epoch_pde = 0.0
+        epoch_bc = 0.0
+        epoch_ic = 0.0
         n_batches_epoch = 0
         for start in range(0, total_samples, batch_size):
             idx = perm[start : start + batch_size]
@@ -110,6 +148,38 @@ def train_antiderivative(
             else:
                 raise ValueError(f"Unsupported bayes_method: {bayes_method}")
 
+            if use_pde:
+                batch_size_cur = u_b.shape[0]
+                y_colloc = (
+                    torch.rand(batch_size_cur, n_collocation, 1, device=device, dtype=u_b.dtype)
+                    * (domain_max - domain_min)
+                    + domain_min
+                )
+                x_sensors_dev = x_sensors.to(device)
+                L_pde = compute_residual(
+                    model, u_b, y_colloc, x_sensors_dev,
+                    pde_type=pi_constraint,
+                    sample=(bayes_method == "alpha_vi"),
+                )
+                loss = loss + pi_weight * L_pde
+                epoch_pde += L_pde.detach().item()
+
+            if use_bc or use_ic:
+                # Antiderivative anchor condition at x=0.
+                L_anchor = _antiderivative_anchor_loss(
+                    model=model,
+                    u_batch=u_b,
+                    anchor=domain_min,
+                    bayes_method=bayes_method,
+                    mse=mse,
+                )
+                if use_bc:
+                    loss = loss + bc_weight * L_anchor
+                    epoch_bc += L_anchor.detach().item()
+                if use_ic:
+                    loss = loss + ic_weight * L_anchor
+                    epoch_ic += L_anchor.detach().item()
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -121,9 +191,15 @@ def train_antiderivative(
         avg_loss = epoch_loss / n_batches_epoch
         avg_nll = epoch_nll / n_batches_epoch
         avg_div = epoch_div / n_batches_epoch
+        avg_pde = epoch_pde / n_batches_epoch if use_pde else 0.0
+        avg_bc = epoch_bc / n_batches_epoch if use_bc else 0.0
+        avg_ic = epoch_ic / n_batches_epoch if use_ic else 0.0
         writer.add_scalar("loss/train", avg_loss, epoch)
         writer.add_scalar("loss/train_nll", avg_nll, epoch)
         writer.add_scalar("loss/train_divergence", avg_div, epoch)
+        writer.add_scalar("loss/pde", avg_pde, epoch)
+        writer.add_scalar("loss/bc", avg_bc, epoch)
+        writer.add_scalar("loss/ic", avg_ic, epoch)
 
         if (epoch + 1) % 5 == 0 or epoch == 0:
             model.eval()
