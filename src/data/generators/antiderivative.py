@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from src.data.registry import register
 
 def sample_grf(n_samples: int, n_sensors: int, length_scale: float = 0.2, domain: tuple = (0.0, 1.0)) -> np.ndarray:
     """Sample from Gaussian Random Field with RBF kernel."""
@@ -25,6 +26,7 @@ def solve_antiderivative(u_at_sensors: np.ndarray, x_sensors: np.ndarray, x_quer
     return s
 
 
+@register("antiderivative")
 def generate_antiderivative_data(
     n_train: int = 3000,
     n_test: int = 1000,
@@ -60,4 +62,5 @@ def generate_antiderivative_data(
         "y_test": y_test,
         "s_test": s_test,
         "x_sensors": x_sensors,
+        "domain": {"min": [float(domain[0])], "max": [float(domain[1])]},
     }

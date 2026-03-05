@@ -1,0 +1,45 @@
+case: burgers
+
+model:
+  bayes_method: deterministic
+  branch_type: transformer
+  trunk_type: fnn
+  branch_hidden: [64, 64]
+  trunk_hidden: [64, 64]
+  output_dim: 64
+  num_sensors: 128
+  coord_dim: 2
+  prior_sigma: 1.0
+  min_noise: 0.001
+  transformer_d_model: 64
+  transformer_nhead: 4
+  transformer_num_layers: 2
+  transformer_dropout: 0.1
+
+physics:
+  pi_constraint: burgers
+  pi_weight: 0.1
+  bc_weight: 1.0
+  ic_weight: 1.0
+  n_collocation: 256
+  burgers_nu: 0.015915494309189533  # 0.05 / pi
+  diffusion_D: 0.01
+  reaction_k: 0.1
+
+training:
+  lr: 0.001
+  epochs: 200
+  batch_size: 128
+  alpha: 1.0
+  mc_samples: 3
+  eval_mc_samples: 20
+  kl_weight: null
+
+data:
+  n_train: 300
+  n_test: 100
+  n_sensors: 128
+  nx: 128
+  nt: 101
+  nu: 0.015915494309189533
+  seed: 42

@@ -1,4 +1,6 @@
 # Base config for PI-BT-DeepONet (快速迭代：小规模)
+case: antiderivative
+
 model:
   bayes_method: deterministic  # deterministic | alpha_vi
   branch_type: fnn  # fnn | transformer
@@ -22,6 +24,9 @@ physics:
   bc_weight: 0.0       # explicit boundary-condition loss weight (antiderivative: s(0)=0)
   ic_weight: 0.0       # explicit initial-condition loss weight (same anchor as BC for antiderivative)
   n_collocation: 256  # per-batch collocation points when pi_constraint != none
+  burgers_nu: 0.015915494309189533  # 0.05 / pi
+  diffusion_D: 0.01
+  reaction_k: 0.1
 
 training:
   lr: 0.001
@@ -31,3 +36,9 @@ training:
   mc_samples: 3
   eval_mc_samples: 20
   kl_weight: null
+
+data:
+  n_train: 300
+  n_test: 100
+  n_sensors: 50
+  seed: 42

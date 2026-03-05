@@ -30,3 +30,24 @@ def gradient_scalar_wrt_coords(
         allow_unused=False,
     )[0]
     return grad
+
+
+def second_derivative_along_dim(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    dim: int,
+) -> torch.Tensor:
+    """Compute second derivative d2(pred)/d(y_dim)^2 for scalar pred."""
+    grad = torch.autograd.grad(outputs=pred.sum(), inputs=y, create_graph=True)[0]
+    first = grad[..., dim]
+    second = torch.autograd.grad(outputs=first.sum(), inputs=y, create_graph=True)[0][..., dim]
+    return second
+
+
+def laplacian_scalar(pred: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Compute Laplacian of scalar pred w.r.t. coordinates y."""
+    coord_dim = y.shape[-1]
+    lap = 0.0
+    for d in range(coord_dim):
+        lap = lap + second_derivative_along_dim(pred, y, d)
+    return lap
