@@ -3,5 +3,15 @@ name = "PI-BT-DeepONet"
 version = "0.1.0"
 description = "Physics-informed Bayesian Transformer Deep Operator Network"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.4",
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "tensorboard",
+    "matplotlib",
+]
+
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu118"]
