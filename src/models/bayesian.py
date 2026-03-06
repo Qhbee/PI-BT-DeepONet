@@ -279,6 +279,34 @@ class BayesianTransformerEncoder(nn.Module):
         return x, log_prior_total, log_variational_total
 
 
+def _to_sensor_tokens(
+    u: torch.Tensor,
+    input_channels: int,
+    num_sensors: int,
+    broadcast_params: bool = True,
+) -> torch.Tensor:
+    """Normalize branch input to (batch, seq_len, input_channels)."""
+    if u.dim() == 2:
+        if input_channels == 1:
+            if u.shape[1] > 1:
+                return u.unsqueeze(-1)
+            tokens = u.unsqueeze(1)  # (batch, 1, 1)
+            return tokens.expand(-1, num_sensors, -1) if broadcast_params else tokens
+        if u.shape[1] != input_channels:
+            raise ValueError(
+                f"Expected u shape (batch, {input_channels}) for parameter input, got {tuple(u.shape)}."
+            )
+        tokens = u.unsqueeze(1)
+        return tokens.expand(-1, num_sensors, -1) if broadcast_params else tokens
+    if u.dim() == 3:
+        if u.shape[-1] != input_channels:
+            raise ValueError(
+                f"Expected u.shape[-1] == input_channels ({input_channels}), got {u.shape[-1]}."
+            )
+        return u
+    raise ValueError(f"Unsupported branch input shape: {tuple(u.shape)}")
+
+
 class BayesianTransformerBranch(nn.Module):
     """Bayesian Transformer branch with stochastic linear projections."""
 
@@ -292,9 +320,12 @@ class BayesianTransformerBranch(nn.Module):
         dim_feedforward: int | None = None,
         dropout: float = 0.1,
         prior_sigma: float = 1.0,
+        input_channels: int = 1,
     ):
         super().__init__()
-        self.embed = BayesianLinear(1, d_model, prior_sigma=prior_sigma)
+        self.num_sensors = num_sensors
+        self.input_channels = input_channels
+        self.embed = BayesianLinear(input_channels, d_model, prior_sigma=prior_sigma)
         self.pos_enc = PositionalEncoding(d_model, max_len=num_sensors, dropout=dropout)
         self.transformer = BayesianTransformerEncoder(
             d_model=d_model,
@@ -307,12 +338,114 @@ class BayesianTransformerBranch(nn.Module):
         self.pool_to_output = BayesianLinear(d_model, output_dim, prior_sigma=prior_sigma)
 
     def forward(self, u: torch.Tensor, sample: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x, lp0, lq0 = self.embed(u.unsqueeze(-1), sample=sample)
+        tokens = _to_sensor_tokens(
+            u,
+            input_channels=self.input_channels,
+            num_sensors=self.num_sensors,
+            broadcast_params=True,
+        )
+        x, lp0, lq0 = self.embed(tokens, sample=sample)
         x = self.pos_enc(x)
         x, lp1, lq1 = self.transformer(x, sample=sample)
         x = x.mean(dim=1)
         x, lp2, lq2 = self.pool_to_output(x, sample=sample)
         return x, lp0 + lp1 + lp2, lq0 + lq1 + lq2
+
+
+class BayesianTransformerMultiOutputBranch(BayesianTransformerBranch):
+    """Bayesian hard-truncation branch for method-2 multi-output DeepONet."""
+
+    def __init__(
+        self,
+        num_sensors: int,
+        n_outputs: int,
+        p_group: int,
+        d_model: int = 64,
+        nhead: int = 4,
+        num_layers: int = 2,
+        dim_feedforward: int | None = None,
+        dropout: float = 0.1,
+        prior_sigma: float = 1.0,
+        input_channels: int = 1,
+    ):
+        self.n_outputs = n_outputs
+        self.p_group = p_group
+        super().__init__(
+            num_sensors=num_sensors,
+            output_dim=n_outputs * p_group,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            prior_sigma=prior_sigma,
+            input_channels=input_channels,
+        )
+
+
+class BayesianTransformerMultiCLSBranch(nn.Module):
+    """Bayesian multi-CLS branch: one stochastic head per output token."""
+
+    def __init__(
+        self,
+        num_sensors: int,
+        n_outputs: int,
+        p_group: int,
+        d_model: int = 64,
+        nhead: int = 4,
+        num_layers: int = 2,
+        dim_feedforward: int | None = None,
+        dropout: float = 0.1,
+        prior_sigma: float = 1.0,
+        input_channels: int = 1,
+    ):
+        super().__init__()
+        self.num_sensors = num_sensors
+        self.n_outputs = n_outputs
+        self.p_group = p_group
+        self.input_channels = input_channels
+
+        self.embed = BayesianLinear(input_channels, d_model, prior_sigma=prior_sigma)
+        self.cls_tokens = nn.Parameter(torch.zeros(n_outputs, d_model))
+        nn.init.normal_(self.cls_tokens, mean=0.0, std=0.02)
+        self.pos_enc = PositionalEncoding(d_model, max_len=num_sensors + n_outputs, dropout=dropout)
+        self.transformer = BayesianTransformerEncoder(
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            prior_sigma=prior_sigma,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.group_heads = nn.ModuleList(
+            [BayesianLinear(d_model, p_group, prior_sigma=prior_sigma) for _ in range(n_outputs)]
+        )
+
+    def forward(self, u: torch.Tensor, sample: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tokens = _to_sensor_tokens(
+            u,
+            input_channels=self.input_channels,
+            num_sensors=self.num_sensors,
+            broadcast_params=True,
+        )
+        sensor_tokens, lp0, lq0 = self.embed(tokens, sample=sample)
+        batch = sensor_tokens.shape[0]
+        cls = self.cls_tokens.unsqueeze(0).expand(batch, -1, -1)
+        x = torch.cat([cls, sensor_tokens], dim=1)
+        x = self.pos_enc(x)
+        x, lp1, lq1 = self.transformer(x, sample=sample)
+        cls_out = x[:, : self.n_outputs, :]
+
+        groups = []
+        log_prior = lp0 + lp1
+        log_variational = lq0 + lq1
+        for i, head in enumerate(self.group_heads):
+            g, lp, lq = head(cls_out[:, i, :], sample=sample)
+            groups.append(g)
+            log_prior = log_prior + lp
+            log_variational = log_variational + lq
+        out = torch.cat(groups, dim=-1)
+        return out, log_prior, log_variational
 
 
 class BayesianDeepONet(nn.Module):
@@ -346,3 +479,51 @@ class BayesianDeepONet(nn.Module):
         log_prior = lp_b + lp_t
         log_variational = lq_b + lq_t
         return pred_mean, pred_std, log_prior, log_variational
+
+
+class BayesianMultiOutputDeepONet(nn.Module):
+    """Bayesian method-2 multi-output DeepONet with grouped dot products."""
+
+    def __init__(
+        self,
+        branch: nn.Module,
+        trunk: nn.Module,
+        n_outputs: int,
+        p_group: int,
+        bias: bool = True,
+        min_noise: float = 1e-3,
+    ):
+        super().__init__()
+        self.branch = branch
+        self.trunk = trunk
+        self.n_outputs = n_outputs
+        self.p_group = p_group
+        self.bias = nn.Parameter(torch.zeros(n_outputs)) if bias else None
+        self.noise_unconstrained = nn.Parameter(torch.tensor(-3.0))
+        self.min_noise = min_noise
+
+    def forward(
+        self,
+        u: torch.Tensor,
+        y: torch.Tensor,
+        sample: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        branch_out, lp_b, lq_b = self.branch(u, sample=sample)
+        trunk_out, lp_t, lq_t = self.trunk(y, sample=sample)
+
+        batch = branch_out.shape[0]
+        b_group = branch_out.reshape(batch, self.n_outputs, self.p_group)
+        if trunk_out.dim() == 2:
+            t_group = trunk_out.reshape(batch, self.n_outputs, self.p_group)
+            pred_mean = (b_group * t_group).sum(dim=-1)
+        else:
+            n_points = trunk_out.shape[1]
+            t_group = trunk_out.reshape(batch, n_points, self.n_outputs, self.p_group)
+            pred_mean = (b_group.unsqueeze(1) * t_group).sum(dim=-1)
+            if pred_mean.size(1) == 1:
+                pred_mean = pred_mean.squeeze(1)
+
+        if self.bias is not None:
+            pred_mean = pred_mean + self.bias
+        pred_std = torch.ones_like(pred_mean) * (F.softplus(self.noise_unconstrained) + self.min_noise)
+        return pred_mean, pred_std, lp_b + lp_t, lq_b + lq_t

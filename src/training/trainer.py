@@ -11,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.physics import compute_residual
+from src.physics.ns_residual import beltrami_solution, kovasznay_solution, pressure_gauge_loss
 
 
 def _alpha_divergence(log_prior: torch.Tensor, log_variational: torch.Tensor, alpha: float) -> torch.Tensor:
@@ -53,12 +54,14 @@ def _compute_ic_bc_losses(
     case: str,
     model: nn.Module,
     u_batch: torch.Tensor,
+    params_batch: torch.Tensor | None,
     x_sensors: torch.Tensor | None,
     domain_min: torch.Tensor,
     domain_max: torch.Tensor,
     mse: nn.Module,
     bayes_method: str,
     n_samples: int,
+    pressure_gauge_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (L_bc, L_ic) for selected case."""
     device = u_batch.device
@@ -69,6 +72,8 @@ def _compute_ic_bc_losses(
     if case == "antiderivative":
         y_anchor = torch.full((batch, 1), float(domain_min[0].item()), device=device, dtype=dtype)
         pred = _predict(model, u_batch, y_anchor, bayes_method=bayes_method, sample=False)
+        if pred.dim() > 1:
+            pred = pred[..., 0]
         anchor_loss = mse(pred, torch.zeros_like(pred))
         return anchor_loss, anchor_loss
 
@@ -78,6 +83,8 @@ def _compute_ic_bc_losses(
         t0 = torch.zeros(batch, n_samples, 1, device=device, dtype=dtype)
         y_ic = torch.cat([t0, x_ic], dim=-1)
         pred_ic = _predict(model, u_batch, y_ic, bayes_method=bayes_method, sample=False)
+        if pred_ic.dim() == 3:
+            pred_ic = pred_ic[..., 0]
         if x_sensors is None:
             raise ValueError("x_sensors is required for Burgers IC interpolation.")
         target_ic = _interp1d_batched(x_sensors, u_batch, x_ic.squeeze(-1))
@@ -91,6 +98,9 @@ def _compute_ic_bc_losses(
         y1 = torch.cat([t_bc, x1], dim=-1).detach().clone().requires_grad_(True)
         p0 = _predict(model, u_batch, y0, bayes_method=bayes_method, sample=False)
         p1 = _predict(model, u_batch, y1, bayes_method=bayes_method, sample=False)
+        if p0.dim() == 3:
+            p0 = p0[..., 0]
+            p1 = p1[..., 0]
         g0 = torch.autograd.grad(outputs=p0.sum(), inputs=y0, create_graph=True)[0][..., 1]
         g1 = torch.autograd.grad(outputs=p1.sum(), inputs=y1, create_graph=True)[0][..., 1]
         L_bc = mse(p0, p1) + mse(g0, g1)
@@ -102,6 +112,8 @@ def _compute_ic_bc_losses(
         t0 = torch.zeros(batch, n_samples, 1, device=device, dtype=dtype)
         y_ic = torch.cat([t0, x_ic], dim=-1)
         p_ic = _predict(model, u_batch, y_ic, bayes_method=bayes_method, sample=False)
+        if p_ic.dim() == 3:
+            p_ic = p_ic[..., 0]
         L_ic = mse(p_ic, torch.zeros_like(p_ic))
 
         t_bc = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[0] - domain_min[0]) + domain_min[0]
@@ -109,6 +121,9 @@ def _compute_ic_bc_losses(
         y_r = torch.cat([t_bc, torch.full_like(t_bc, domain_max[1])], dim=-1)
         p_l = _predict(model, u_batch, y_l, bayes_method=bayes_method, sample=False)
         p_r = _predict(model, u_batch, y_r, bayes_method=bayes_method, sample=False)
+        if p_l.dim() == 3:
+            p_l = p_l[..., 0]
+            p_r = p_r[..., 0]
         L_bc = mse(p_l, torch.zeros_like(p_l)) + mse(p_r, torch.zeros_like(p_r))
         return L_bc, L_ic
 
@@ -125,8 +140,95 @@ def _compute_ic_bc_losses(
         p_t = _predict(model, u_batch, y_top, bayes_method=bayes_method, sample=False)
         p_l = _predict(model, u_batch, y_lft, bayes_method=bayes_method, sample=False)
         p_r = _predict(model, u_batch, y_rgt, bayes_method=bayes_method, sample=False)
+        if p_b.dim() == 3:
+            p_b = p_b[..., 0]
+            p_t = p_t[..., 0]
+            p_l = p_l[..., 0]
+            p_r = p_r[..., 0]
         L_bc = mse(p_b, torch.zeros_like(p_b)) + mse(p_t, torch.zeros_like(p_t)) + mse(p_l, torch.zeros_like(p_l)) + mse(p_r, torch.zeros_like(p_r))
         return L_bc, zero
+
+    if case.startswith("ns_kovasznay"):
+        if params_batch is not None and params_batch.shape[-1] >= 1:
+            re = params_batch[:, 0]
+        elif u_batch.dim() == 2 and u_batch.shape[-1] == 1:
+            re = u_batch[:, 0]
+        else:
+            re = torch.full((batch,), 40.0, device=device, dtype=dtype)
+
+        def _sample_boundary_points() -> list[torch.Tensor]:
+            y_rand = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[1] - domain_min[1]) + domain_min[1]
+            x_rand = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[0] - domain_min[0]) + domain_min[0]
+            x_l = torch.full_like(y_rand, domain_min[0])
+            x_r = torch.full_like(y_rand, domain_max[0])
+            y_b = torch.full_like(x_rand, domain_min[1])
+            y_t = torch.full_like(x_rand, domain_max[1])
+            return [
+                torch.cat([x_l, y_rand], dim=-1),
+                torch.cat([x_r, y_rand], dim=-1),
+                torch.cat([x_rand, y_b], dim=-1),
+                torch.cat([x_rand, y_t], dim=-1),
+            ]
+
+        L_bc = zero
+        for y_bc in _sample_boundary_points():
+            pred_bc = _predict(model, u_batch, y_bc, bayes_method=bayes_method, sample=False)
+            if pred_bc.shape[-1] < 3:
+                raise ValueError("ns_kovasznay requires multi-output prediction with at least 3 channels.")
+            target_bc = kovasznay_solution(y_bc, re)[..., :3]
+            L_bc = L_bc + mse(pred_bc[..., :3], target_bc)
+        L_bc = L_bc / 4.0
+        if pressure_gauge_weight > 0:
+            pred_probe = _predict(model, u_batch, _sample_boundary_points()[0], bayes_method=bayes_method, sample=False)
+            L_bc = L_bc + pressure_gauge_weight * pressure_gauge_loss(pred_probe[..., :3], mode="mean_zero")
+        return L_bc, zero
+
+    if case.startswith("ns_beltrami"):
+        if params_batch is not None and params_batch.shape[-1] >= 2:
+            a = params_batch[:, 0]
+            d = params_batch[:, 1]
+        else:
+            a = torch.ones(batch, device=device, dtype=dtype)
+            d = torch.ones(batch, device=device, dtype=dtype)
+
+        # IC at t = 0
+        x_ic = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[1] - domain_min[1]) + domain_min[1]
+        y_ic = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[2] - domain_min[2]) + domain_min[2]
+        z_ic = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[3] - domain_min[3]) + domain_min[3]
+        t0 = torch.zeros(batch, n_samples, 1, device=device, dtype=dtype)
+        y0 = torch.cat([t0, x_ic, y_ic, z_ic], dim=-1)
+        pred_ic = _predict(model, u_batch, y0, bayes_method=bayes_method, sample=False)
+        target_ic = beltrami_solution(y0, a, d)
+        L_ic = mse(pred_ic[..., :4], target_ic[..., :4])
+
+        # BC on 6 faces
+        t_bc = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[0] - domain_min[0]) + domain_min[0]
+        xr = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[1] - domain_min[1]) + domain_min[1]
+        yr = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[2] - domain_min[2]) + domain_min[2]
+        zr = torch.rand(batch, n_samples, 1, device=device, dtype=dtype) * (domain_max[3] - domain_min[3]) + domain_min[3]
+        x_l = torch.full_like(xr, domain_min[1])
+        x_r = torch.full_like(xr, domain_max[1])
+        y_l = torch.full_like(yr, domain_min[2])
+        y_r = torch.full_like(yr, domain_max[2])
+        z_l = torch.full_like(zr, domain_min[3])
+        z_r = torch.full_like(zr, domain_max[3])
+        faces = [
+            torch.cat([t_bc, x_l, yr, zr], dim=-1),
+            torch.cat([t_bc, x_r, yr, zr], dim=-1),
+            torch.cat([t_bc, xr, y_l, zr], dim=-1),
+            torch.cat([t_bc, xr, y_r, zr], dim=-1),
+            torch.cat([t_bc, xr, yr, z_l], dim=-1),
+            torch.cat([t_bc, xr, yr, z_r], dim=-1),
+        ]
+        L_bc = zero
+        for y_face in faces:
+            pred_face = _predict(model, u_batch, y_face, bayes_method=bayes_method, sample=False)
+            target_face = beltrami_solution(y_face, a, d)
+            L_bc = L_bc + mse(pred_face[..., :4], target_face[..., :4])
+        L_bc = L_bc / len(faces)
+        if pressure_gauge_weight > 0:
+            L_bc = L_bc + pressure_gauge_weight * pressure_gauge_loss(pred_ic[..., :4], mode="mean_zero")
+        return L_bc, L_ic
 
     return zero, zero
 
@@ -154,8 +256,11 @@ def train_operator(
     diffusion_D: float = 0.01,
     reaction_k: float = 0.1,
     burgers_nu: float = 0.01 / math.pi,
+    ns_nu: float = 1.0 / 40.0,
+    ns_beltrami_nu: float = 1.0,
+    pressure_gauge_weight: float = 0.0,
 ):
-    """Generic trainer for single-output operator tasks."""
+    """Generic trainer for single-output or multi-output operator tasks."""
     if uq_mode is not None:
         bayes_method = uq_mode
 
@@ -170,23 +275,42 @@ def train_operator(
     u_test = torch.from_numpy(data["u_test"]).float()
     y_test = torch.from_numpy(data["y_test"]).float()
     s_test = torch.from_numpy(data["s_test"]).float()
+    params_train = torch.from_numpy(data["params_train"]).float() if "params_train" in data else None
+    params_test = torch.from_numpy(data["params_test"]).float() if "params_test" in data else None
     x_sensors = torch.from_numpy(data["x_sensors"]).float() if "x_sensors" in data else None
 
     if y_train.dim() == 2:
         y_train = y_train.unsqueeze(-1)
     if y_test.dim() == 2:
         y_test = y_test.unsqueeze(-1)
+    if s_train.dim() == 2:
+        s_train = s_train.unsqueeze(-1)
+    if s_test.dim() == 2:
+        s_test = s_test.unsqueeze(-1)
 
     coord_dim = y_train.shape[-1]
+    n_out = s_train.shape[-1]
     n_train = u_train.shape[0]
     n_points = y_train.shape[1]
     total_samples = n_train * n_points
     num_batches = max(1, math.ceil(total_samples / batch_size))
     effective_kl_weight = kl_weight if kl_weight is not None else (1.0 / num_batches)
 
-    u_flat = u_train.unsqueeze(1).expand(-1, n_points, -1).reshape(total_samples, -1)
+    if u_train.dim() == 2:
+        u_flat = u_train.unsqueeze(1).expand(-1, n_points, -1).reshape(total_samples, -1)
+    elif u_train.dim() == 3:
+        m, c = u_train.shape[1], u_train.shape[2]
+        u_flat = u_train.unsqueeze(1).expand(-1, n_points, -1, -1).reshape(total_samples, m, c)
+    else:
+        raise ValueError(f"Unsupported u_train shape: {tuple(u_train.shape)}")
+
+    if params_train is not None:
+        params_flat = params_train.unsqueeze(1).expand(-1, n_points, -1).reshape(total_samples, -1)
+    else:
+        params_flat = None
+
     y_flat = y_train.reshape(total_samples, coord_dim)
-    s_flat = s_train.reshape(total_samples)
+    s_flat = s_train.reshape(total_samples, n_out)
 
     if "domain" in data:
         domain_min = torch.tensor(data["domain"]["min"], dtype=torch.float32, device=device)
@@ -223,11 +347,14 @@ def train_operator(
         for start in range(0, total_samples, batch_size):
             idx = perm[start : start + batch_size]
             u_b = u_flat[idx].to(device)
+            params_b = params_flat[idx].to(device) if params_flat is not None else None
             y_b = y_flat[idx].to(device)
             s_b = s_flat[idx].to(device)
 
             if bayes_method == "deterministic":
                 pred = model(u_b, y_b)
+                if pred.dim() == 1:
+                    pred = pred.unsqueeze(-1)
                 loss = mse(pred, s_b)
                 nll_for_log = loss.detach()
                 div_for_log = torch.zeros_like(nll_for_log)
@@ -237,6 +364,9 @@ def train_operator(
                 mc_log_variational = []
                 for _ in range(mc_samples):
                     pred_mean, pred_std, log_prior, log_variational = model(u_b, y_b, sample=True)
+                    if pred_mean.dim() == 1:
+                        pred_mean = pred_mean.unsqueeze(-1)
+                        pred_std = pred_std.unsqueeze(-1)
                     mc_nll.append(_gaussian_nll(pred_mean, pred_std, s_b))
                     mc_log_prior.append(log_prior)
                     mc_log_variational.append(log_variational)
@@ -255,7 +385,7 @@ def train_operator(
                 low = domain_min.view(1, 1, -1)
                 span = (domain_max - domain_min).view(1, 1, -1)
                 y_colloc = torch.rand(batch_size_cur, n_collocation, coord_dim, device=device, dtype=u_b.dtype) * span + low
-                x_sensors_dev = x_sensors.to(device) if x_sensors is not None else torch.linspace(0.0, 1.0, u_b.shape[1], device=device, dtype=u_b.dtype)
+                x_sensors_dev = x_sensors.to(device) if x_sensors is not None else None
                 L_pde = compute_residual(
                     model=model,
                     u=u_b,
@@ -266,6 +396,10 @@ def train_operator(
                     nu=burgers_nu,
                     diffusion_D=diffusion_D,
                     reaction_k=reaction_k,
+                    params=params_b,
+                    ns_nu=ns_nu,
+                    ns_beltrami_nu=ns_beltrami_nu,
+                    pressure_gauge_weight=pressure_gauge_weight,
                 )
                 loss = loss + pi_weight * L_pde
                 epoch_pde += L_pde.detach().item()
@@ -276,12 +410,14 @@ def train_operator(
                     case=case,
                     model=model,
                     u_batch=u_b,
+                    params_batch=params_b,
                     x_sensors=x_sensors_dev,
                     domain_min=domain_min,
                     domain_max=domain_max,
                     mse=mse,
                     bayes_method=bayes_method,
                     n_samples=max(8, n_collocation // 8),
+                    pressure_gauge_weight=pressure_gauge_weight,
                 )
                 if use_bc:
                     loss = loss + bc_weight * L_bc
@@ -319,6 +455,8 @@ def train_operator(
                 s_test_dev = s_test.to(device)
                 if bayes_method == "deterministic":
                     pred_test = model(u_test_dev, y_test_dev)
+                    if pred_test.dim() == 2:
+                        pred_test = pred_test.unsqueeze(-1)
                     test_mse = mse(pred_test, s_test_dev).item()
                     rel_l2 = (pred_test.cpu() - s_test).norm(2) / (s_test.norm(2) + 1e-8)
                 else:
@@ -326,6 +464,9 @@ def train_operator(
                     aleatoric_var_samples = []
                     for _ in range(eval_mc_samples):
                         pred_mean, pred_std, _, _ = model(u_test_dev, y_test_dev, sample=True)
+                        if pred_mean.dim() == 2:
+                            pred_mean = pred_mean.unsqueeze(-1)
+                            pred_std = pred_std.unsqueeze(-1)
                         pred_samples.append(pred_mean)
                         aleatoric_var_samples.append(pred_std**2)
                     pred_stack = torch.stack(pred_samples, dim=0)
@@ -341,6 +482,15 @@ def train_operator(
 
                 writer.add_scalar("loss/test_mse", test_mse, epoch)
                 writer.add_scalar("metric/rel_l2", rel_l2.item(), epoch)
+                if n_out > 1:
+                    for i in range(n_out):
+                        comp_mse = mse(pred_test[..., i], s_test_dev[..., i]).item()
+                        writer.add_scalar(f"loss/test_mse_comp_{i}", comp_mse, epoch)
+                        comp_rel = (
+                            (pred_test[..., i].cpu() - s_test[..., i]).norm(2)
+                            / (s_test[..., i].norm(2) + 1e-8)
+                        ).item()
+                        writer.add_scalar(f"metric/rel_l2_comp_{i}", comp_rel, epoch)
                 last_metrics["rel_l2"] = rel_l2.item()
                 last_metrics["test_mse"] = test_mse
                 pbar.set_postfix(loss=f"{avg_loss:.4f}", rel_l2=f"{rel_l2.item():.4f}")

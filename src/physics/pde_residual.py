@@ -4,6 +4,8 @@ import inspect
 
 import torch
 
+from .ns_residual import beltrami_vp_residual, kovasznay_vp_residual, pressure_gauge_loss
+
 
 def _interp1d_batched(
     x_sensors: torch.Tensor,
@@ -189,16 +191,73 @@ def _darcy_residual(
     return (residual**2).mean()
 
 
+def _ns_kovasznay_residual(
+    model: torch.nn.Module,
+    u: torch.Tensor,
+    y: torch.Tensor,
+    params: torch.Tensor | None,
+    nu_default: float = 1.0 / 40.0,
+    sample: bool = True,
+    pressure_gauge_weight: float = 0.0,
+) -> torch.Tensor:
+    y_req = y.detach().clone().requires_grad_(True)
+    pred = _predict(model, u, y_req, sample=sample)
+    if pred.dim() == 2:
+        pred = pred.unsqueeze(1)
+    if pred.shape[-1] < 3:
+        raise ValueError(f"ns_kovasznay requires at least 3 outputs (u,v,p), got {pred.shape[-1]}.")
+    pred = pred[..., :3]
+
+    if params is not None and params.shape[-1] >= 1:
+        re = params[:, 0].to(pred.dtype)
+    elif u.dim() == 2 and u.shape[-1] == 1:
+        re = u[:, 0].to(pred.dtype)
+    else:
+        re = torch.full((u.shape[0],), 1.0 / max(nu_default, 1e-8), device=u.device, dtype=pred.dtype)
+    re = torch.clamp(re, min=1e-6)
+    nu = 1.0 / re
+
+    loss = kovasznay_vp_residual(pred, y_req, nu=nu)
+    if pressure_gauge_weight > 0:
+        loss = loss + pressure_gauge_weight * pressure_gauge_loss(pred, mode="mean_zero")
+    return loss
+
+
+def _ns_beltrami_residual(
+    model: torch.nn.Module,
+    u: torch.Tensor,
+    y: torch.Tensor,
+    nu: float = 1.0,
+    sample: bool = True,
+    pressure_gauge_weight: float = 0.0,
+) -> torch.Tensor:
+    y_req = y.detach().clone().requires_grad_(True)
+    pred = _predict(model, u, y_req, sample=sample)
+    if pred.dim() == 2:
+        pred = pred.unsqueeze(1)
+    if pred.shape[-1] < 4:
+        raise ValueError(f"ns_beltrami requires at least 4 outputs (u,v,w,p), got {pred.shape[-1]}.")
+    pred = pred[..., :4]
+    loss = beltrami_vp_residual(pred, y_req, nu=nu)
+    if pressure_gauge_weight > 0:
+        loss = loss + pressure_gauge_weight * pressure_gauge_loss(pred, mode="mean_zero")
+    return loss
+
+
 def compute_residual(
     model: torch.nn.Module,
     u: torch.Tensor,
     y: torch.Tensor,
-    x_sensors: torch.Tensor,
+    x_sensors: torch.Tensor | None,
     pde_type: str,
     sample: bool = True,
     nu: float = 0.01 / 3.141592653589793,
     diffusion_D: float = 0.01,
     reaction_k: float = 0.1,
+    params: torch.Tensor | None = None,
+    ns_nu: float = 1.0 / 40.0,
+    ns_beltrami_nu: float = 1.0,
+    pressure_gauge_weight: float = 0.0,
 ) -> torch.Tensor:
     """
     Compute PDE residual loss.
@@ -217,12 +276,18 @@ def compute_residual(
     if pde_type == "none":
         return torch.tensor(0.0, device=u.device, dtype=u.dtype)
     if pde_type == "antiderivative":
+        if x_sensors is None:
+            raise ValueError("x_sensors is required for antiderivative residual.")
         if x_sensors.dim() > 1:
             x_sensors = x_sensors[0]
         return _antiderivative_residual(model, u, y, x_sensors, sample=sample)
     if pde_type == "burgers":
+        if x_sensors is None:
+            raise ValueError("x_sensors is required for burgers residual.")
         return _burgers_residual(model, u, y, x_sensors, nu=nu, sample=sample)
     if pde_type == "diffusion_reaction":
+        if x_sensors is None:
+            raise ValueError("x_sensors is required for diffusion_reaction residual.")
         return _diffusion_reaction_residual(
             model,
             u,
@@ -234,4 +299,23 @@ def compute_residual(
         )
     if pde_type == "darcy":
         return _darcy_residual(model, u, y, sample=sample)
+    if pde_type == "ns_kovasznay":
+        return _ns_kovasznay_residual(
+            model=model,
+            u=u,
+            y=y,
+            params=params,
+            nu_default=ns_nu,
+            sample=sample,
+            pressure_gauge_weight=pressure_gauge_weight,
+        )
+    if pde_type == "ns_beltrami":
+        return _ns_beltrami_residual(
+            model=model,
+            u=u,
+            y=y,
+            nu=ns_beltrami_nu,
+            sample=sample,
+            pressure_gauge_weight=pressure_gauge_weight,
+        )
     raise ValueError(f"Unknown pde_type: {pde_type}")

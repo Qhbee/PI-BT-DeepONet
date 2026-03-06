@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import sys
 import time
 from pathlib import Path
@@ -18,16 +19,26 @@ from src.data.generators import (  # noqa: F401
     generate_burgers_data,
     generate_darcy_data,
     generate_diffusion_reaction_data,
+    generate_ns_beltrami_ic2field_data,
+    generate_ns_beltrami_parametric_data,
+    generate_ns_kovasznay_bc2field_data,
+    generate_ns_kovasznay_parametric_data,
 )
 from src.models import (
     BayesianDeepONet,
     BayesianFNNBranch,
     BayesianFNNTrunk,
+    BayesianMultiOutputDeepONet,
     BayesianTransformerBranch,
+    BayesianTransformerMultiCLSBranch,
+    BayesianTransformerMultiOutputBranch,
     DeepONet,
     FNNBranch,
     FNNTrunk,
+    MultiOutputDeepONet,
     TransformerBranch,
+    TransformerMultiCLSBranch,
+    TransformerMultiOutputBranch,
 )
 from src.training import train_operator
 
@@ -41,52 +52,123 @@ def build_model(cfg: dict, coord_dim: int, branch_type: str, bayes_method: str):
     train_cfg = dict(cfg.get("training", {}))
     num_sensors = int(model_cfg.get("num_sensors", 50))
     output_dim = int(model_cfg.get("output_dim", 20))
+    n_outputs = int(model_cfg.get("n_outputs", 1))
+    p_group = int(model_cfg.get("p_group", output_dim))
+    model_type = model_cfg.get("model_type", "deeponet")
+    if n_outputs > 1 and model_type == "deeponet":
+        model_type = "deeponet_multi_output"
+    is_multi = model_type == "deeponet_multi_output"
+    total_out = n_outputs * p_group if is_multi else output_dim
+    input_channels = int(model_cfg.get("input_channels", 1))
     branch_hidden = model_cfg.get("branch_hidden", [20, 20])
     trunk_hidden = model_cfg.get("trunk_hidden", [20, 20])
 
     if bayes_method == "deterministic":
-        if branch_type == "transformer":
-            branch = TransformerBranch(
-                num_sensors,
-                output_dim,
+        if branch_type == "transformer_multicls":
+            branch = TransformerMultiCLSBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
                 d_model=model_cfg.get("transformer_d_model", 32),
                 nhead=model_cfg.get("transformer_nhead", 4),
                 num_layers=model_cfg.get("transformer_num_layers", 2),
                 dropout=model_cfg.get("transformer_dropout", 0.1),
+                input_channels=input_channels,
+            )
+        elif branch_type == "transformer_multi_output":
+            branch = TransformerMultiOutputBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                input_channels=input_channels,
+            )
+        elif branch_type == "transformer":
+            branch = TransformerBranch(
+                num_sensors,
+                total_out,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                input_channels=input_channels,
             )
         else:
-            branch = FNNBranch(num_sensors, branch_hidden, output_dim)
-        trunk = FNNTrunk(coord_dim, trunk_hidden, output_dim)
-        model = DeepONet(branch, trunk, output_dim, bias=True)
+            branch = FNNBranch(num_sensors, branch_hidden, total_out)
+        trunk = FNNTrunk(coord_dim, trunk_hidden, total_out)
+        model = (
+            MultiOutputDeepONet(branch=branch, trunk=trunk, n_outputs=n_outputs, p_group=p_group, bias=True)
+            if is_multi
+            else DeepONet(branch, trunk, output_dim, bias=True)
+        )
     else:
-        if branch_type == "transformer":
-            branch = BayesianTransformerBranch(
+        if branch_type == "transformer_multicls":
+            branch = BayesianTransformerMultiCLSBranch(
                 num_sensors=num_sensors,
-                output_dim=output_dim,
+                n_outputs=n_outputs,
+                p_group=p_group,
                 d_model=model_cfg.get("transformer_d_model", 32),
                 nhead=model_cfg.get("transformer_nhead", 4),
                 num_layers=model_cfg.get("transformer_num_layers", 2),
                 dropout=model_cfg.get("transformer_dropout", 0.1),
                 prior_sigma=model_cfg.get("prior_sigma", 1.0),
+                input_channels=input_channels,
+            )
+        elif branch_type == "transformer_multi_output":
+            branch = BayesianTransformerMultiOutputBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                prior_sigma=model_cfg.get("prior_sigma", 1.0),
+                input_channels=input_channels,
+            )
+        elif branch_type == "transformer":
+            branch = BayesianTransformerBranch(
+                num_sensors=num_sensors,
+                output_dim=total_out,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                prior_sigma=model_cfg.get("prior_sigma", 1.0),
+                input_channels=input_channels,
             )
         else:
             branch = BayesianFNNBranch(
                 num_sensors=num_sensors,
                 hidden_dims=branch_hidden,
-                output_dim=output_dim,
+                output_dim=total_out,
                 prior_sigma=model_cfg.get("prior_sigma", 1.0),
             )
         trunk = BayesianFNNTrunk(
             input_dim=coord_dim,
             hidden_dims=trunk_hidden,
-            output_dim=output_dim,
+            output_dim=total_out,
             prior_sigma=model_cfg.get("prior_sigma", 1.0),
         )
-        model = BayesianDeepONet(
-            branch=branch,
-            trunk=trunk,
-            bias=True,
-            min_noise=model_cfg.get("min_noise", 1e-3),
+        model = (
+            BayesianMultiOutputDeepONet(
+                branch=branch,
+                trunk=trunk,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                bias=True,
+                min_noise=model_cfg.get("min_noise", 1e-3),
+            )
+            if is_multi
+            else BayesianDeepONet(
+                branch=branch,
+                trunk=trunk,
+                bias=True,
+                min_noise=model_cfg.get("min_noise", 1e-3),
+            )
         )
 
     alpha = train_cfg.get("alpha", 1.0)
@@ -112,12 +194,21 @@ def main():
     train_cfg = cfg.get("training", {})
     physics_cfg = cfg.get("physics", {})
     data_cfg = cfg.get("data", {})
-    data_cfg.setdefault("n_sensors", int(model_cfg.get("num_sensors", 50)))
 
     generator = get_generator(case)
+    if "n_sensors" in inspect.signature(generator).parameters:
+        data_cfg.setdefault("n_sensors", int(model_cfg.get("num_sensors", 50)))
     data = generator(**data_cfg)
     y_train = data["y_train"]
     coord_dim = y_train.shape[-1] if y_train.ndim == 3 else 1
+    s_train = data["s_train"]
+    n_outputs = s_train.shape[-1] if s_train.ndim == 3 else 1
+    model_cfg["n_outputs"] = int(n_outputs)
+    u_train = data["u_train"]
+    if u_train.ndim == 3:
+        model_cfg["input_channels"] = int(u_train.shape[-1])
+    elif case.startswith("ns_") and u_train.ndim == 2 and u_train.shape[1] <= 4:
+        model_cfg["input_channels"] = int(u_train.shape[1])
 
     combos = []
     for bayes_method in ("deterministic", "alpha_vi"):
@@ -157,6 +248,9 @@ def main():
             burgers_nu=physics_cfg.get("burgers_nu", 0.01 / torch.pi),
             diffusion_D=physics_cfg.get("diffusion_D", 0.01),
             reaction_k=physics_cfg.get("reaction_k", 0.1),
+            ns_nu=physics_cfg.get("ns_nu", 1.0 / 40.0),
+            ns_beltrami_nu=physics_cfg.get("ns_beltrami_nu", 1.0),
+            pressure_gauge_weight=physics_cfg.get("pressure_gauge_weight", 0.0),
         )
         elapsed = time.perf_counter() - t0
         results.append(

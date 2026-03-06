@@ -1,0 +1,48 @@
+case: ns_kovasznay_parametric
+
+model:
+  model_type: deeponet_multi_output
+  bayes_method: deterministic
+  branch_type: transformer_multi_output  # transformer_multi_output | transformer_multicls
+  trunk_type: fnn
+  branch_hidden: [64, 64]
+  trunk_hidden: [64, 64]
+  output_dim: 32        # used as p_group when p_group is not provided
+  p_group: 32
+  num_sensors: 64       # route A: parameter tokens are broadcast to this sequence length
+  coord_dim: 2
+  input_channels: 1
+  prior_sigma: 1.0
+  min_noise: 0.001
+  transformer_d_model: 64
+  transformer_nhead: 4
+  transformer_num_layers: 2
+  transformer_dropout: 0.1
+
+physics:
+  pi_constraint: ns_kovasznay
+  pi_weight: 0.1
+  bc_weight: 1.0
+  ic_weight: 0.0
+  n_collocation: 256
+  ns_nu: 0.025  # Re=40 reference if params are unavailable
+  ns_beltrami_nu: 1.0
+  pressure_gauge_weight: 0.01
+
+training:
+  lr: 0.001
+  epochs: 100
+  batch_size: 64
+  alpha: 1.0
+  mc_samples: 3
+  eval_mc_samples: 20
+  kl_weight: null
+
+data:
+  n_train: 200
+  n_test: 50
+  re_min: 20.0
+  re_max: 60.0
+  nx: 64
+  ny: 64
+  seed: 42
