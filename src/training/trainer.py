@@ -252,6 +252,7 @@ def train_operator(
     pi_weight: float = 0.0,
     bc_weight: float = 0.0,
     ic_weight: float = 0.0,
+    physics_mode: str = "standard_pi",
     n_collocation: int = 256,
     diffusion_D: float = 0.01,
     reaction_k: float = 0.1,
@@ -327,8 +328,9 @@ def train_operator(
     writer = SummaryWriter(log_dir)
 
     use_pde = pi_constraint != "none" and pi_weight > 0
-    use_bc = bc_weight > 0
-    use_ic = ic_weight > 0
+    skip_bc_ic_for_hard = physics_mode == "hard_bc_pi" and case in ("diffusion_reaction",)
+    use_bc = bc_weight > 0 and not skip_bc_ic_for_hard
+    use_ic = ic_weight > 0 and not skip_bc_ic_for_hard
 
     last_metrics = {"loss": float("nan"), "rel_l2": float("nan"), "test_mse": float("nan")}
     pbar = tqdm(range(epochs), desc=f"Training[{case}]", ncols=120, miniters=0.1, maxinterval=5)
@@ -400,6 +402,9 @@ def train_operator(
                     ns_nu=ns_nu,
                     ns_beltrami_nu=ns_beltrami_nu,
                     pressure_gauge_weight=pressure_gauge_weight,
+                    physics_mode=physics_mode,
+                    domain_min=domain_min,
+                    domain_max=domain_max,
                 )
                 loss = loss + pi_weight * L_pde
                 epoch_pde += L_pde.detach().item()
@@ -519,6 +524,7 @@ def train_antiderivative(
     pi_weight: float = 0.0,
     bc_weight: float = 0.0,
     ic_weight: float = 0.0,
+    physics_mode: str = "standard_pi",
     n_collocation: int = 256,
 ):
     """Backward-compatible antiderivative trainer wrapper."""
@@ -541,5 +547,6 @@ def train_antiderivative(
         pi_weight=pi_weight,
         bc_weight=bc_weight,
         ic_weight=ic_weight,
+        physics_mode=physics_mode,
         n_collocation=n_collocation,
     )

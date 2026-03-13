@@ -1,4 +1,4 @@
-# 阶段6：batch/epoch 说明
+# 阶段6：batch/epoch 说明与 POD 文件清单
 
 ## 一、batch 是什么、有什么用
 
@@ -27,4 +27,4 @@
 
 ## 三、POD
 
-POD（PODTrunk、build_ns_pod_basis）已移至**阶段 7** 规划。
+POD（PODTrunk、build_ns_pod_basis）已移至**阶段 8** 规划。

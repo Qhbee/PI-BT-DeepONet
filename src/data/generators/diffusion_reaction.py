@@ -26,22 +26,23 @@ def _solve_diffusion_reaction(
     D: float,
     k: float,
 ) -> np.ndarray:
-    """Explicit FD solver for s_t = D s_xx + k s^2 + source(x)."""
+    """Explicit FD solver for s_t = D s_xx + k*s + source(x). k<0 for stability."""
     nx = x_grid.shape[0]
     nt = t_grid.shape[0]
     dx = float(x_grid[1] - x_grid[0])
     dt = float(t_grid[1] - t_grid[0])
-
+    cfl = 2 * D * dt / (dx * dx)
+    if cfl > 1:
+        dt = 0.4 * dx * dx / (2 * D)
     s = np.zeros((nt, nx), dtype=np.float32)
-    # Zero-Dirichlet BC and zero IC.
     for n in range(1, nt):
-        prev = s[n - 1]
+        prev = s[n - 1].copy()
         lap = np.zeros_like(prev)
         lap[1:-1] = (prev[2:] - 2.0 * prev[1:-1] + prev[:-2]) / (dx * dx)
-        next_s = prev + dt * (D * lap + k * (prev**2) + source_x)
+        next_s = prev + dt * (D * lap + k * prev + source_x)
         next_s[0] = 0.0
         next_s[-1] = 0.0
-        s[n] = next_s
+        s[n] = np.clip(next_s, -1e6, 1e6)
     return s
 
 
@@ -53,7 +54,7 @@ def generate_diffusion_reaction_data(
     nx: int = 100,
     nt: int = 101,
     D: float = 0.01,
-    k: float = 0.1,
+    k: float = -0.01,
     seed: int | None = 123,
 ) -> dict:
     """Generate data for diffusion-reaction operator learning."""

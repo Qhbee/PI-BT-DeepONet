@@ -34,6 +34,7 @@ from src.models import (
     TransformerMultiCLSBranch,
     TransformerMultiOutputBranch,
 )
+from src.physics.hard_bc import HardBCWrapper
 from src.training.trainer import train_operator
 
 
@@ -247,6 +248,12 @@ def main():
         input_channels=input_channels,
     )
 
+    physics_mode = physics_cfg.get("physics_mode", "standard_pi")
+    if physics_mode == "hard_bc_pi" and case in ("diffusion_reaction",):
+        print(f"Wrapping model with HardBCWrapper for case={case}")
+        model = HardBCWrapper(model, case)
+
+    log_subdir = f"{case}" if physics_mode == "standard_pi" else f"{case}_{physics_mode}"
     print("Training...")
     _, _ = train_operator(
         model,
@@ -255,7 +262,7 @@ def main():
         lr=train_cfg.get("lr", 0.001),
         epochs=train_cfg.get("epochs", 10000),
         batch_size=train_cfg.get("batch_size", 256),
-        log_dir=f"experiments/{case}",
+        log_dir=f"experiments/{log_subdir}",
         bayes_method=bayes_method,
         alpha=train_cfg.get("alpha", 1.0),
         mc_samples=train_cfg.get("mc_samples", 3),
@@ -265,6 +272,7 @@ def main():
         pi_weight=physics_cfg.get("pi_weight", 0.0),
         bc_weight=physics_cfg.get("bc_weight", 0.0),
         ic_weight=physics_cfg.get("ic_weight", 0.0),
+        physics_mode=physics_cfg.get("physics_mode", "standard_pi"),
         n_collocation=physics_cfg.get("n_collocation", 256),
         diffusion_D=physics_cfg.get("diffusion_D", 0.01),
         reaction_k=physics_cfg.get("reaction_k", 0.1),

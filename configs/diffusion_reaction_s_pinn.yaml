@@ -1,0 +1,37 @@
+# Stage 7: diffusion_reaction with S-PINN subdomain residual
+case: diffusion_reaction
+
+model:
+  bayes_method: deterministic
+  branch_type: fnn
+  trunk_type: fnn
+  branch_hidden: [64, 64]
+  trunk_hidden: [64, 64]
+  output_dim: 64
+  num_sensors: 100
+  coord_dim: 2
+
+physics:
+  physics_mode: s_pinn
+  pi_constraint: diffusion_reaction
+  pi_weight: 0.1
+  bc_weight: 1.0
+  ic_weight: 1.0
+  n_collocation: 256
+  diffusion_D: 0.01
+  reaction_k: -0.01
+
+training:
+  lr: 0.001
+  epochs: 15
+  batch_size: 128
+
+data:
+  n_train: 300
+  n_test: 100
+  n_sensors: 100
+  nx: 100
+  nt: 101
+  D: 0.01
+  k: -0.01
+  seed: 123

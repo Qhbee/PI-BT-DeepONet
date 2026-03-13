@@ -25,6 +25,7 @@ def _interp1d_batched(
     """
     if y_query.dim() == 3:
         y_query = y_query.squeeze(-1)
+    y_query = y_query.contiguous()
     batch, n = y_query.shape
     m = x_sensors.shape[0]
     device = u.device
@@ -51,10 +52,16 @@ def _predict(
     sample: bool = True,
 ) -> torch.Tensor:
     """Run deterministic or Bayesian model and return predictive mean."""
-    if _is_bayesian_model(model):
-        pred, _, _, _ = model(u, y, sample=sample)
-        return pred
-    return model(u, y)
+    out = model(u, y, sample=sample) if _has_sample_param(model) else model(u, y)
+    if isinstance(out, tuple) and len(out) >= 1:
+        return out[0]
+    return out
+
+
+def _has_sample_param(model: torch.nn.Module) -> bool:
+    """Check if model.forward has sample parameter."""
+    sig = inspect.signature(model.forward)
+    return "sample" in sig.parameters
 
 
 def _first_and_second_x_derivatives(
@@ -151,15 +158,16 @@ def _diffusion_reaction_residual(
 ) -> torch.Tensor:
     """
     Diffusion-reaction PDE:
-        s_t - D*s_xx - k*s^2 - source(x) = 0
+        s_t - D*s_xx - k*s - source(x) = 0
     with y=(t,x) and source interpolated from branch input u.
+    k<0 for stability (sink term).
     """
     y_req = y.detach().clone().requires_grad_(True)
     pred = _predict(model, u, y_req, sample=sample)
     d_dt, _, d_xx = _first_and_second_x_derivatives(pred, y_req)
     x_query = y_req[..., 1]
     source_x = _interp1d_batched(x_sensors, u, x_query.detach())
-    residual = d_dt - D * d_xx - k_reaction * (pred**2) - source_x
+    residual = d_dt - D * d_xx - k_reaction * pred - source_x
     return (residual**2).mean()
 
 
@@ -244,6 +252,49 @@ def _ns_beltrami_residual(
     return loss
 
 
+def _diffusion_reaction_residual_s_pinn(
+    model: torch.nn.Module,
+    u: torch.Tensor,
+    x_sensors: torch.Tensor,
+    D: float,
+    k_reaction: float,
+    sample: bool,
+    domain_min: torch.Tensor,
+    domain_max: torch.Tensor,
+    n_collocation: int,
+    n_subdomains: int = 16,
+) -> torch.Tensor:
+    """
+    S-PINN style: partition domain into subdomains, compute mean residual per subdomain.
+    For 2D (t,x), use a grid of subdomains.
+    """
+    batch = u.shape[0]
+    device = u.device
+    dtype = u.dtype
+    coord_dim = 2
+    n_per_sub = max(4, n_collocation // n_subdomains)
+    total_loss = 0.0
+    count = 0
+    # 4x4 grid for full mode; 2x2 for small n_collocation (ultra)
+    grid = 2 if n_collocation <= 64 else 4
+    nt, nx = grid, grid
+    t_min, t_max = domain_min[0].item(), domain_max[0].item()
+    x_min, x_max = domain_min[1].item(), domain_max[1].item()
+    for it in range(nt):
+        for ix in range(nx):
+            t_low = t_min + (t_max - t_min) * it / nt
+            t_high = t_min + (t_max - t_min) * (it + 1) / nt
+            x_low = x_min + (x_max - x_min) * ix / nx
+            x_high = x_min + (x_max - x_min) * (ix + 1) / nx
+            t_c = torch.rand(batch, n_per_sub, 1, device=device, dtype=dtype) * (t_high - t_low) + t_low
+            x_c = torch.rand(batch, n_per_sub, 1, device=device, dtype=dtype) * (x_high - x_low) + x_low
+            y_sub = torch.cat([t_c, x_c], dim=-1)
+            r = _diffusion_reaction_residual(model, u, y_sub, x_sensors, D=D, k_reaction=k_reaction, sample=sample)
+            total_loss = total_loss + r
+            count += 1
+    return total_loss / max(1, count)
+
+
 def compute_residual(
     model: torch.nn.Module,
     u: torch.Tensor,
@@ -258,6 +309,9 @@ def compute_residual(
     ns_nu: float = 1.0 / 40.0,
     ns_beltrami_nu: float = 1.0,
     pressure_gauge_weight: float = 0.0,
+    physics_mode: str = "standard_pi",
+    domain_min: torch.Tensor | None = None,
+    domain_max: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Compute PDE residual loss.
@@ -269,12 +323,25 @@ def compute_residual(
         x_sensors: (num_sensors,) or (coord_dim, num_sensors) sensor positions
         pde_type: "none" | "antiderivative" | "burgers" | "diffusion_reaction" | "darcy"
         sample: for Bayesian models, whether to sample weights
+        physics_mode: "standard_pi" | "hard_bc_pi" | "s_pinn"
 
     Returns:
         scalar residual loss
     """
     if pde_type == "none":
         return torch.tensor(0.0, device=u.device, dtype=u.dtype)
+
+    if physics_mode == "s_pinn" and pde_type == "diffusion_reaction" and x_sensors is not None:
+        if domain_min is None or domain_max is None:
+            domain_min = torch.tensor([0.0, 0.0], device=u.device, dtype=u.dtype)
+            domain_max = torch.tensor([1.0, 1.0], device=u.device, dtype=u.dtype)
+        n_colloc = y.shape[1] if y.dim() == 3 else 64
+        if x_sensors.dim() > 1:
+            x_sensors = x_sensors[0]
+        return _diffusion_reaction_residual_s_pinn(
+            model, u, x_sensors, diffusion_D, reaction_k, sample,
+            domain_min, domain_max, n_colloc, n_subdomains=16,
+        )
     if pde_type == "antiderivative":
         if x_sensors is None:
             raise ValueError("x_sensors is required for antiderivative residual.")
