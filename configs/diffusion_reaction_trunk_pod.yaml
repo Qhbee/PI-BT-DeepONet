@@ -1,0 +1,36 @@
+# Stage 8: diffusion_reaction with POD trunk
+case: diffusion_reaction
+
+model:
+  bayes_method: deterministic
+  branch_type: fnn
+  trunk_type: pod
+  pod_path: artifacts/pod/diffusion_reaction_pod.npz
+  branch_hidden: [64, 64]
+  output_dim: 64
+  num_sensors: 100
+
+physics:
+  physics_mode: standard_pi
+  pi_constraint: diffusion_reaction
+  pi_weight: 0.1
+  bc_weight: 1.0
+  ic_weight: 1.0
+  n_collocation: 256
+  diffusion_D: 0.01
+  reaction_k: -0.01
+
+training:
+  lr: 0.001
+  epochs: 15
+  batch_size: 128
+
+data:
+  n_train: 300
+  n_test: 100
+  n_sensors: 100
+  nx: 100
+  nt: 101
+  D: 0.01
+  k: -0.01
+  seed: 123

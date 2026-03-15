@@ -20,22 +20,140 @@ from src.data.generators import (  # noqa: F401 - force registration side effect
 )
 from src.models import (
     BayesianDeepONet,
+    BayesianExDeepONet,
+    BayesianExFNNTrunk,
+    BayesianExV2FNNTrunk,
     BayesianFNNBranch,
     BayesianFNNTrunk,
     BayesianMultiOutputDeepONet,
+    BayesianPODDeepONet,
     BayesianTransformerBranch,
     BayesianTransformerMultiCLSBranch,
     BayesianTransformerMultiOutputBranch,
     DeepONet,
+    ExDeepONet,
+    ExFNNTrunk,
+    ExV2FNNTrunk,
     FNNBranch,
+    FixedPODTrunk,
     FNNTrunk,
     MultiOutputDeepONet,
+    PODDeepONet,
     TransformerBranch,
     TransformerMultiCLSBranch,
     TransformerMultiOutputBranch,
 )
 from src.physics.hard_bc import HardBCWrapper
 from src.training.trainer import train_operator
+
+
+def _build_deterministic_branch(
+    branch_type: str,
+    num_sensors: int,
+    output_dim: int,
+    n_outputs: int,
+    p_group: int,
+    input_channels: int,
+    model_cfg: dict,
+    branch_hidden: list[int],
+):
+    if branch_type.startswith("transformer"):
+        print(
+            f"Using TransformerBranch (d_model={model_cfg.get('transformer_d_model', 32)}, "
+            f"nhead={model_cfg.get('transformer_nhead', 4)})"
+        )
+        if branch_type == "transformer_multicls":
+            return TransformerMultiCLSBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                input_channels=input_channels,
+            )
+        if branch_type == "transformer_multi_output":
+            return TransformerMultiOutputBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                input_channels=input_channels,
+            )
+        return TransformerBranch(
+            num_sensors=num_sensors,
+            output_dim=output_dim,
+            d_model=model_cfg.get("transformer_d_model", 32),
+            nhead=model_cfg.get("transformer_nhead", 4),
+            num_layers=model_cfg.get("transformer_num_layers", 2),
+            dropout=model_cfg.get("transformer_dropout", 0.1),
+            input_channels=input_channels,
+        )
+    print("Using FNNBranch")
+    return FNNBranch(num_sensors, branch_hidden, output_dim)
+
+
+def _build_bayesian_branch(
+    branch_type: str,
+    num_sensors: int,
+    output_dim: int,
+    n_outputs: int,
+    p_group: int,
+    input_channels: int,
+    model_cfg: dict,
+    branch_hidden: list[int],
+    train_cfg: dict,
+):
+    if branch_type.startswith("transformer"):
+        print(
+            f"Using BayesianTransformerBranch + Bayesian trunk "
+            f"(alpha={train_cfg.get('alpha', 1.0)})"
+        )
+        if branch_type == "transformer_multicls":
+            return BayesianTransformerMultiCLSBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                prior_sigma=model_cfg.get("prior_sigma", 1.0),
+                input_channels=input_channels,
+            )
+        if branch_type == "transformer_multi_output":
+            return BayesianTransformerMultiOutputBranch(
+                num_sensors=num_sensors,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                d_model=model_cfg.get("transformer_d_model", 32),
+                nhead=model_cfg.get("transformer_nhead", 4),
+                num_layers=model_cfg.get("transformer_num_layers", 2),
+                dropout=model_cfg.get("transformer_dropout", 0.1),
+                prior_sigma=model_cfg.get("prior_sigma", 1.0),
+                input_channels=input_channels,
+            )
+        return BayesianTransformerBranch(
+            num_sensors=num_sensors,
+            output_dim=output_dim,
+            d_model=model_cfg.get("transformer_d_model", 32),
+            nhead=model_cfg.get("transformer_nhead", 4),
+            num_layers=model_cfg.get("transformer_num_layers", 2),
+            dropout=model_cfg.get("transformer_dropout", 0.1),
+            prior_sigma=model_cfg.get("prior_sigma", 1.0),
+            input_channels=input_channels,
+        )
+    print(f"Using BayesianFNNBranch + Bayesian trunk (alpha={train_cfg.get('alpha', 1.0)})")
+    return BayesianFNNBranch(
+        num_sensors=num_sensors,
+        hidden_dims=branch_hidden,
+        output_dim=output_dim,
+        prior_sigma=model_cfg.get("prior_sigma", 1.0),
+    )
 
 
 def _build_model(
@@ -59,58 +177,147 @@ def _build_model(
     branch_hidden = model_cfg.get("branch_hidden", [40, 40])
     trunk_hidden = model_cfg.get("trunk_hidden", [40, 40])
 
-    if trunk_type != "fnn":
-        raise ValueError("Current implementation supports trunk_type='fnn' only.")
-
-    if bayes_method == "alpha_vi":
-        if branch_type.startswith("transformer"):
-            print(
-                f"Using BayesianTransformerBranch + BayesianFNNTrunk "
-                f"(alpha={train_cfg.get('alpha', 1.0)})"
-            )
-            if branch_type == "transformer_multicls":
-                branch = BayesianTransformerMultiCLSBranch(
-                    num_sensors=num_sensors,
-                    n_outputs=n_outputs,
-                    p_group=p_group,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    prior_sigma=model_cfg.get("prior_sigma", 1.0),
-                    input_channels=input_channels,
-                )
-            elif branch_type == "transformer_multi_output":
-                branch = BayesianTransformerMultiOutputBranch(
-                    num_sensors=num_sensors,
-                    n_outputs=n_outputs,
-                    p_group=p_group,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    prior_sigma=model_cfg.get("prior_sigma", 1.0),
-                    input_channels=input_channels,
-                )
-            else:
-                branch = BayesianTransformerBranch(
-                    num_sensors=num_sensors,
-                    output_dim=branch_output_dim,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    prior_sigma=model_cfg.get("prior_sigma", 1.0),
-                    input_channels=input_channels,
-                )
-        else:
-            print(f"Using BayesianFNNBranch + BayesianFNNTrunk (alpha={train_cfg.get('alpha', 1.0)})")
-            branch = BayesianFNNBranch(
+    if trunk_type == "pod":
+        pod_path = model_cfg.get("pod_path", "artifacts/pod/diffusion_reaction_pod.npz")
+        trunk = FixedPODTrunk(pod_path, coord_dim=coord_dim)
+        rank = trunk.output_dim
+        if bayes_method == "alpha_vi":
+            branch = _build_bayesian_branch(
+                branch_type=branch_type,
                 num_sensors=num_sensors,
-                hidden_dims=branch_hidden,
-                output_dim=branch_output_dim,
+                output_dim=rank,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+                train_cfg=train_cfg,
+            )
+            model = BayesianPODDeepONet(
+                branch=branch,
+                trunk=trunk,
+                bias=True,
+                min_noise=model_cfg.get("min_noise", 1e-3),
+            )
+        elif bayes_method == "deterministic":
+            branch = _build_deterministic_branch(
+                branch_type=branch_type,
+                num_sensors=num_sensors,
+                output_dim=rank,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+            )
+            model = PODDeepONet(branch=branch, trunk=trunk, bias=True)
+        else:
+            raise ValueError(f"Unsupported bayes_method: {bayes_method}")
+        print(f"Using FixedPODTrunk (rank={rank}) + {'Bayesian' if bayes_method == 'alpha_vi' else ''} PODDeepONet")
+        return model, bayes_method
+
+    if trunk_type == "ex":
+        if is_multi_output:
+            raise ValueError("trunk_type='ex' currently supports single-output tasks only.")
+        coeff_dim = sum(trunk_hidden) + trunk_hidden[-1]
+        if bayes_method == "alpha_vi":
+            branch = _build_bayesian_branch(
+                branch_type=branch_type,
+                num_sensors=num_sensors,
+                output_dim=coeff_dim,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+                train_cfg=train_cfg,
+            )
+            trunk = BayesianExFNNTrunk(
+                input_dim=coord_dim,
+                hidden_dims=trunk_hidden,
                 prior_sigma=model_cfg.get("prior_sigma", 1.0),
             )
+            model = BayesianExDeepONet(
+                branch=branch,
+                trunk=trunk,
+                bias=True,
+                min_noise=model_cfg.get("min_noise", 1e-3),
+            )
+        elif bayes_method == "deterministic":
+            branch = _build_deterministic_branch(
+                branch_type=branch_type,
+                num_sensors=num_sensors,
+                output_dim=coeff_dim,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+            )
+            trunk = ExFNNTrunk(coord_dim, trunk_hidden)
+            model = ExDeepONet(branch=branch, trunk=trunk, bias=True)
+        else:
+            raise ValueError(f"Unsupported bayes_method: {bayes_method}")
+        print("Using paper-style ExDeepONet (branch modulates all trunk layers)")
+        return model, bayes_method
+
+    if trunk_type == "ex_v2":
+        if is_multi_output:
+            raise ValueError("trunk_type='ex_v2' currently supports single-output tasks only.")
+        coeff_dim = sum(trunk_hidden)
+        if bayes_method == "alpha_vi":
+            branch = _build_bayesian_branch(
+                branch_type=branch_type,
+                num_sensors=num_sensors,
+                output_dim=coeff_dim,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+                train_cfg=train_cfg,
+            )
+            trunk = BayesianExV2FNNTrunk(
+                input_dim=coord_dim,
+                hidden_dims=trunk_hidden,
+                prior_sigma=model_cfg.get("prior_sigma", 1.0),
+            )
+            model = BayesianExDeepONet(
+                branch=branch,
+                trunk=trunk,
+                bias=True,
+                min_noise=model_cfg.get("min_noise", 1e-3),
+            )
+        elif bayes_method == "deterministic":
+            branch = _build_deterministic_branch(
+                branch_type=branch_type,
+                num_sensors=num_sensors,
+                output_dim=coeff_dim,
+                n_outputs=n_outputs,
+                p_group=p_group,
+                input_channels=input_channels,
+                model_cfg=model_cfg,
+                branch_hidden=branch_hidden,
+            )
+            trunk = ExV2FNNTrunk(coord_dim, trunk_hidden)
+            model = ExDeepONet(branch=branch, trunk=trunk, bias=True)
+        else:
+            raise ValueError(f"Unsupported bayes_method: {bayes_method}")
+        print("Using ExV2DeepONet (input modulation + external dot product)")
+        return model, bayes_method
+
+    if bayes_method == "alpha_vi":
+        branch = _build_bayesian_branch(
+            branch_type=branch_type,
+            num_sensors=num_sensors,
+            output_dim=branch_output_dim,
+            n_outputs=n_outputs,
+            p_group=p_group,
+            input_channels=input_channels,
+            model_cfg=model_cfg,
+            branch_hidden=branch_hidden,
+            train_cfg=train_cfg,
+        )
         trunk = BayesianFNNTrunk(
             input_dim=coord_dim,
             hidden_dims=trunk_hidden,
@@ -134,46 +341,16 @@ def _build_model(
                 min_noise=model_cfg.get("min_noise", 1e-3),
             )
     elif bayes_method == "deterministic":
-        if branch_type.startswith("transformer"):
-            print(
-                f"Using TransformerBranch (d_model={model_cfg.get('transformer_d_model', 32)}, "
-                f"nhead={model_cfg.get('transformer_nhead', 4)})"
-            )
-            if branch_type == "transformer_multicls":
-                branch = TransformerMultiCLSBranch(
-                    num_sensors=num_sensors,
-                    n_outputs=n_outputs,
-                    p_group=p_group,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    input_channels=input_channels,
-                )
-            elif branch_type == "transformer_multi_output":
-                branch = TransformerMultiOutputBranch(
-                    num_sensors=num_sensors,
-                    n_outputs=n_outputs,
-                    p_group=p_group,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    input_channels=input_channels,
-                )
-            else:
-                branch = TransformerBranch(
-                    num_sensors=num_sensors,
-                    output_dim=branch_output_dim,
-                    d_model=model_cfg.get("transformer_d_model", 32),
-                    nhead=model_cfg.get("transformer_nhead", 4),
-                    num_layers=model_cfg.get("transformer_num_layers", 2),
-                    dropout=model_cfg.get("transformer_dropout", 0.1),
-                    input_channels=input_channels,
-                )
-        else:
-            print("Using FNNBranch")
-            branch = FNNBranch(num_sensors, branch_hidden, branch_output_dim)
+        branch = _build_deterministic_branch(
+            branch_type=branch_type,
+            num_sensors=num_sensors,
+            output_dim=branch_output_dim,
+            n_outputs=n_outputs,
+            p_group=p_group,
+            input_channels=input_channels,
+            model_cfg=model_cfg,
+            branch_hidden=branch_hidden,
+        )
         trunk = FNNTrunk(coord_dim, trunk_hidden, branch_output_dim)
         if is_multi_output:
             model = MultiOutputDeepONet(

@@ -159,6 +159,145 @@ class BayesianFNNTrunk(nn.Module):
         return self.net(y, sample=sample)
 
 
+class BayesianExFNNTrunk(nn.Module):
+    """Paper-style Bayesian Ex-DeepONet trunk (Eq.9, Li et al. 2025).
+
+    Hidden layers:  s_k = σ(c_k * (W·s_{k-1} + b)),  k = 2 .. m-1
+    Output layer:   s_m = Σ c_m * s_{m-1}             (no Linear, no activation)
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+        prior_sigma: float = 1.0,
+        activation: str = "relu",
+    ):
+        super().__init__()
+        if not hidden_dims:
+            raise ValueError("BayesianExFNNTrunk requires at least one hidden layer.")
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = 1
+        self.coeff_dim = sum(hidden_dims) + hidden_dims[-1]
+        self.activation = nn.ReLU() if activation == "relu" else nn.Tanh()
+        dims = [input_dim] + hidden_dims
+        self.layers = nn.ModuleList(
+            [BayesianLinear(dims[i], dims[i + 1], prior_sigma=prior_sigma) for i in range(len(dims) - 1)]
+        )
+
+    def _split_coeffs(self, coeffs: torch.Tensor) -> list[torch.Tensor]:
+        sizes = self.hidden_dims + [self.hidden_dims[-1]]
+        return list(torch.split(coeffs, sizes, dim=-1))
+
+    def forward(
+        self,
+        y: torch.Tensor,
+        coeffs: torch.Tensor,
+        sample: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        coeff_groups = self._split_coeffs(coeffs)
+        c_hidden = coeff_groups[:-1]
+        c_out = coeff_groups[-1]
+        log_prior_total = torch.zeros((), device=coeffs.device, dtype=coeffs.dtype)
+        log_variational_total = torch.zeros((), device=coeffs.device, dtype=coeffs.dtype)
+
+        if y.dim() == 2:
+            x = y
+            for layer, ck in zip(self.layers, c_hidden):
+                x, lp, lq = layer(x, sample=sample)
+                x = self.activation(x * ck)
+                log_prior_total = log_prior_total + lp
+                log_variational_total = log_variational_total + lq
+            return (x * c_out).sum(dim=-1), log_prior_total, log_variational_total
+
+        batch, n_points, _ = y.shape
+        x = y.reshape(-1, self.input_dim)
+        for layer, ck in zip(self.layers, c_hidden):
+            x, lp, lq = layer(x, sample=sample)
+            ck_exp = ck.unsqueeze(1).expand(-1, n_points, -1).reshape(-1, ck.shape[-1])
+            x = self.activation(x * ck_exp)
+            log_prior_total = log_prior_total + lp
+            log_variational_total = log_variational_total + lq
+        c_out_exp = c_out.unsqueeze(1).expand(-1, n_points, -1).reshape(-1, c_out.shape[-1])
+        out = (x * c_out_exp).sum(dim=-1).reshape(batch, n_points)
+        if out.size(1) == 1:
+            out = out.squeeze(1)
+        return out, log_prior_total, log_variational_total
+
+
+class BayesianExV2FNNTrunk(nn.Module):
+    """Bayesian input-modulated Ex-DeepONet trunk with external dot product.
+
+    s_0 = y,  c_0 = 1 (no modulation on first layer input)
+    s_k = σ(W_{k-1} · (c_{k-1} · s_{k-1}) + b_{k-1}),  k = 1 .. m
+    Output: <c_m, s_m>  (all layers have activation; final dot product is external)
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+        prior_sigma: float = 1.0,
+        activation: str = "relu",
+    ):
+        super().__init__()
+        if not hidden_dims:
+            raise ValueError("BayesianExV2FNNTrunk requires at least one hidden layer.")
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = 1
+        self.coeff_dim = sum(hidden_dims)
+        self.activation = nn.ReLU() if activation == "relu" else nn.Tanh()
+        dims = [input_dim] + hidden_dims
+        self.layers = nn.ModuleList(
+            [BayesianLinear(dims[i], dims[i + 1], prior_sigma=prior_sigma) for i in range(len(dims) - 1)]
+        )
+
+    def _split_coeffs(self, coeffs: torch.Tensor) -> list[torch.Tensor]:
+        return list(torch.split(coeffs, self.hidden_dims, dim=-1))
+
+    def forward(
+        self,
+        y: torch.Tensor,
+        coeffs: torch.Tensor,
+        sample: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        coeff_groups = self._split_coeffs(coeffs)
+        c_modulate = coeff_groups[:-1]
+        c_out = coeff_groups[-1]
+        log_prior_total = torch.zeros((), device=coeffs.device, dtype=coeffs.dtype)
+        log_variational_total = torch.zeros((), device=coeffs.device, dtype=coeffs.dtype)
+
+        if y.dim() == 2:
+            x = y
+            for i, layer in enumerate(self.layers):
+                if i > 0:
+                    x = x * c_modulate[i - 1]
+                x, lp, lq = layer(x, sample=sample)
+                x = self.activation(x)
+                log_prior_total = log_prior_total + lp
+                log_variational_total = log_variational_total + lq
+            return (x * c_out).sum(dim=-1), log_prior_total, log_variational_total
+
+        batch, n_points, _ = y.shape
+        x = y.reshape(-1, self.input_dim)
+        for i, layer in enumerate(self.layers):
+            if i > 0:
+                ck = c_modulate[i - 1]
+                ck_exp = ck.unsqueeze(1).expand(-1, n_points, -1).reshape(-1, ck.shape[-1])
+                x = x * ck_exp
+            x, lp, lq = layer(x, sample=sample)
+            x = self.activation(x)
+            log_prior_total = log_prior_total + lp
+            log_variational_total = log_variational_total + lq
+        c_out_exp = c_out.unsqueeze(1).expand(-1, n_points, -1).reshape(-1, c_out.shape[-1])
+        out = (x * c_out_exp).sum(dim=-1).reshape(batch, n_points)
+        if out.size(1) == 1:
+            out = out.squeeze(1)
+        return out, log_prior_total, log_variational_total
+
+
 class BayesianMultiHeadSelfAttention(nn.Module):
     """Bayesian multi-head self-attention."""
 
@@ -523,6 +662,68 @@ class BayesianMultiOutputDeepONet(nn.Module):
             if pred_mean.size(1) == 1:
                 pred_mean = pred_mean.squeeze(1)
 
+        if self.bias is not None:
+            pred_mean = pred_mean + self.bias
+        pred_std = torch.ones_like(pred_mean) * (F.softplus(self.noise_unconstrained) + self.min_noise)
+        return pred_mean, pred_std, lp_b + lp_t, lq_b + lq_t
+
+
+class BayesianPODDeepONet(nn.Module):
+    """Bayesian POD-DeepONet with Bayesian branch and fixed POD trunk."""
+
+    def __init__(self, branch: nn.Module, trunk: nn.Module, bias: bool = True, min_noise: float = 1e-3):
+        super().__init__()
+        self.branch = branch
+        self.trunk = trunk
+        self.bias = nn.Parameter(torch.zeros(1)) if bias else None
+        self.noise_unconstrained = nn.Parameter(torch.tensor(-3.0))
+        self.min_noise = min_noise
+
+    def forward(
+        self,
+        u: torch.Tensor,
+        y: torch.Tensor,
+        sample: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        coeffs, lp_b, lq_b = self.branch(u, sample=sample)
+        phi = self.trunk(y)
+        if hasattr(self.trunk, "get_mean_at_y"):
+            mean_field = self.trunk.get_mean_at_y(y)
+        else:
+            mean_field = torch.zeros(coeffs.shape[0], device=coeffs.device, dtype=coeffs.dtype)
+            if phi.dim() == 3:
+                mean_field = mean_field.unsqueeze(1).expand(-1, phi.shape[1])
+        if phi.dim() == 2:
+            pred_mean = mean_field + (coeffs * phi).sum(dim=-1)
+        else:
+            pred_mean = mean_field + (coeffs.unsqueeze(1) * phi).sum(dim=-1)
+            if pred_mean.size(1) == 1:
+                pred_mean = pred_mean.squeeze(1)
+        if self.bias is not None:
+            pred_mean = pred_mean + self.bias
+        pred_std = torch.ones_like(pred_mean) * (F.softplus(self.noise_unconstrained) + self.min_noise)
+        return pred_mean, pred_std, lp_b, lq_b
+
+
+class BayesianExDeepONet(nn.Module):
+    """Paper-style Bayesian Ex-DeepONet with branch modulation on all trunk layers."""
+
+    def __init__(self, branch: nn.Module, trunk: nn.Module, bias: bool = True, min_noise: float = 1e-3):
+        super().__init__()
+        self.branch = branch
+        self.trunk = trunk
+        self.bias = nn.Parameter(torch.zeros(1)) if bias else None
+        self.noise_unconstrained = nn.Parameter(torch.tensor(-3.0))
+        self.min_noise = min_noise
+
+    def forward(
+        self,
+        u: torch.Tensor,
+        y: torch.Tensor,
+        sample: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        coeffs, lp_b, lq_b = self.branch(u, sample=sample)
+        pred_mean, lp_t, lq_t = self.trunk(y, coeffs, sample=sample)
         if self.bias is not None:
             pred_mean = pred_mean + self.bias
         pred_std = torch.ones_like(pred_mean) * (F.softplus(self.noise_unconstrained) + self.min_noise)

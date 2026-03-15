@@ -12,6 +12,10 @@ wheels/
 # IDE
 .idea/
 .vscode/
+*.code-workspace
 
 # Experiments
 experiments/
+
+# Artifacts (POD basis, etc.)
+artifacts/

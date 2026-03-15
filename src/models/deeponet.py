@@ -1,10 +1,74 @@
-"""DeepONet: G(u)(y) = b0 + sum(b_i * t_i)."""
+"""DeepONet: G(u)(y) = b0 + sum(b_i * t_i). Includes ExDeepONet (nonlinear fusion)."""
 
 import torch
 import torch.nn as nn
 
 from .branch import FNNBranch
 from .trunk import FNNTrunk
+
+
+class ExDeepONet(nn.Module):
+    """
+    Paper-style Ex-DeepONet.
+    The branch outputs layer-wise coefficients that modulate all trunk layers.
+    """
+
+    def __init__(
+        self,
+        branch: nn.Module,
+        trunk: nn.Module,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.branch = branch
+        self.trunk = trunk
+        self.output_dim = 1
+        self.bias = nn.Parameter(torch.zeros(1)) if bias else None
+
+    def forward(self, u: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        coeffs = self.branch(u)
+        out = self.trunk(y, coeffs)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+
+class PODDeepONet(nn.Module):
+    """
+    POD-DeepONet: G(u)(y) = mean(y) + b(u)^T @ phi(y).
+    Uses FixedPODTrunk for phi(y), branch for coefficients b(u).
+    """
+
+    def __init__(
+        self,
+        branch: nn.Module,
+        trunk: nn.Module,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.branch = branch
+        self.trunk = trunk
+        self.output_dim = 1
+        self.bias = nn.Parameter(torch.zeros(1)) if bias else None
+
+    def forward(self, u: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        b = self.branch(u)  # (batch, rank)
+        phi = self.trunk(y)  # (batch, rank) or (batch, n_points, rank)
+        if hasattr(self.trunk, "get_mean_at_y"):
+            m = self.trunk.get_mean_at_y(y)
+        else:
+            m = torch.zeros(b.shape[0], device=b.device, dtype=b.dtype)
+            if phi.dim() == 3:
+                m = m.unsqueeze(1).expand(-1, phi.shape[1])
+        if phi.dim() == 2:
+            out = m + (b * phi).sum(dim=-1)
+        else:
+            out = m + (b.unsqueeze(1) * phi).sum(dim=-1)
+            if out.size(1) == 1:
+                out = out.squeeze(1)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
 class DeepONet(nn.Module):
