@@ -260,8 +260,14 @@ def train_operator(
     ns_nu: float = 1.0 / 40.0,
     ns_beltrami_nu: float = 1.0,
     pressure_gauge_weight: float = 0.0,
+    progress_unit: str = "batch",
+    progress_mininterval: float = 0.5,
 ):
-    """Generic trainer for single-output or multi-output operator tasks."""
+    """Generic trainer for single-output or multi-output operator tasks.
+
+    progress_unit: "epoch" (one step per epoch) or "batch" (one step per batch, finer)
+    progress_mininterval: min seconds between progress bar updates (reduce flicker)
+    """
     if uq_mode is not None:
         bayes_method = uq_mode
 
@@ -333,9 +339,16 @@ def train_operator(
     use_ic = ic_weight > 0 and not skip_bc_ic_for_hard
 
     last_metrics = {"loss": float("nan"), "rel_l2": float("nan"), "test_mse": float("nan")}
-    pbar = tqdm(range(epochs), desc=f"Training[{case}]", ncols=120, miniters=0.1, maxinterval=5)
 
-    for epoch in pbar:
+    if progress_unit == "batch":
+        total_steps = epochs * num_batches
+        pbar = tqdm(total=total_steps, desc=f"Training[{case}]", ncols=120, mininterval=progress_mininterval, maxinterval=10, unit="batch")
+        epoch_iter: range = range(epochs)
+    else:
+        pbar = tqdm(range(epochs), desc=f"Training[{case}]", ncols=120, mininterval=progress_mininterval, maxinterval=10, unit="epoch")
+        epoch_iter = pbar
+
+    for epoch in epoch_iter:
         model.train()
         perm = torch.randperm(total_samples)
         epoch_loss = 0.0
@@ -438,6 +451,11 @@ def train_operator(
             epoch_nll += nll_for_log.item()
             epoch_div += div_for_log.item()
             n_batches_epoch += 1
+
+            if progress_unit == "batch":
+                pbar.update(1)
+                run_loss = epoch_loss / n_batches_epoch
+                pbar.set_postfix(loss=f"{run_loss:.4f}", rel_l2=f"{last_metrics.get('rel_l2', 0):.4f}")
 
         avg_loss = epoch_loss / n_batches_epoch
         avg_nll = epoch_nll / n_batches_epoch

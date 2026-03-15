@@ -457,6 +457,8 @@ def main():
         ns_nu=physics_cfg.get("ns_nu", 1.0 / 40.0),
         ns_beltrami_nu=physics_cfg.get("ns_beltrami_nu", 1.0),
         pressure_gauge_weight=physics_cfg.get("pressure_gauge_weight", 0.0),
+        progress_unit=train_cfg.get("progress_unit", "batch"),
+        progress_mininterval=train_cfg.get("progress_mininterval", 0.5),
     )
     print("Done.")
 
