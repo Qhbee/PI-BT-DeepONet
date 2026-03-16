@@ -370,6 +370,7 @@ def _build_model(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/base.yaml", help="Path to YAML config.")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training.")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -459,6 +460,10 @@ def main():
         pressure_gauge_weight=physics_cfg.get("pressure_gauge_weight", 0.0),
         progress_unit=train_cfg.get("progress_unit", "batch"),
         progress_mininterval=train_cfg.get("progress_mininterval", 0.5),
+        checkpoint_every=train_cfg.get("checkpoint_every", 0),
+        checkpoint_dir=train_cfg.get("checkpoint_dir"),
+        resume_from=args.resume,
+        seed=data_cfg.get("seed"),
     )
     print("Done.")
 

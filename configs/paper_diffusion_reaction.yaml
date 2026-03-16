@@ -1,0 +1,43 @@
+case: diffusion_reaction
+
+model:
+  bayes_method: alpha_vi
+  branch_type: transformer
+  trunk_type: fnn
+  branch_hidden: [32, 32]
+  trunk_hidden: [32, 32]
+  output_dim: 32
+  num_sensors: 50
+  transformer_d_model: 32
+  transformer_nhead: 4
+  transformer_num_layers: 2
+
+physics:
+  physics_mode: standard_pi
+  pi_constraint: diffusion_reaction
+  pi_weight: 0.1
+  bc_weight: 1.0
+  ic_weight: 1.0
+  n_collocation: 128
+  diffusion_D: 0.01
+  reaction_k: -0.01
+
+training:
+  lr: 0.001
+  epochs: 30
+  batch_size: 64
+  alpha: 1.0
+  mc_samples: 2
+  eval_mc_samples: 5
+  checkpoint_every: 10
+  progress_unit: epoch  # epoch-level progress for long runs
+
+data:
+  n_train: 100
+  n_test: 30
+  n_sensors: 50
+  nx: 32
+  nt: 33
+  D: 0.01
+  k: -0.01
+  seed: 123

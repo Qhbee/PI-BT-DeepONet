@@ -6,6 +6,8 @@ main.py already supports PI extension; this script demonstrates compatibility.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
@@ -30,6 +32,15 @@ def count_params(model) -> int:
 
 
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--epochs", type=int, default=None, help="Override epochs (default: from config)")
+    p.add_argument("--fast", action="store_true", help="减小 nx/nt 加速（nx=30,nt=31）")
+    p.add_argument("--faster", action="store_true", help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训")
+    p.add_argument("--checkpoint-every", type=int, default=5, help="Save checkpoint every N epochs (0=disable)")
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
+    p.add_argument("--seed", type=int, default=None, help="Override seed (default: from data_cfg)")
+    args = p.parse_args()
+
     out_dir = Path("experiments/stage7")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,6 +72,10 @@ def main():
         train_cfg = cfg.get("training", {})
         data_cfg = cfg.get("data", {})
 
+        if args.faster:
+            data_cfg = {**data_cfg, "nx": 15, "nt": 16}
+        elif args.fast:
+            data_cfg = {**data_cfg, "nx": 30, "nt": 31}
         if ULTRA:
             data_cfg = {
                 "n_train": 12,
@@ -72,7 +87,7 @@ def main():
                 "k": -0.01,
                 "seed": 123,
             }
-            train_cfg = {**train_cfg, "epochs": 2, "batch_size": 16}
+            train_cfg = {**train_cfg, "epochs": args.epochs if args.epochs is not None else 2, "batch_size": 16}
             physics_cfg = {**physics_cfg, "n_collocation": 16, "reaction_k": -0.01}
             base_model_cfg = {
                 **base_model_cfg,
@@ -97,7 +112,8 @@ def main():
 
         run_name = f"{mode_name}_transformer_bayes"
         print(f"\n{'='*60}")
-        print(f"Stage 7: {run_name}" + (" [ULTRA]" if ULTRA else ""))
+        suf = " [ULTRA]" if ULTRA else (" [FASTER]" if args.faster else (" [FAST]" if args.fast else ""))
+        print(f"Stage 7: {run_name}{suf}")
         print("=" * 60)
 
         model, _ = _build_model(
@@ -131,8 +147,20 @@ def main():
             n_collocation=physics_cfg.get("n_collocation", 256),
             diffusion_D=physics_cfg.get("diffusion_D", 0.01),
             reaction_k=physics_cfg.get("reaction_k", -0.01),
+            seed=args.seed if args.seed is not None else data_cfg.get("seed", 123),
+            checkpoint_every=args.checkpoint_every,
+            resume_from=args.resume if (args.resume and run_name in args.resume) else None,
         )
         elapsed = time.perf_counter() - t0
+
+        # 保存每 epoch 的 loss/rel_l2/test_mse 历史
+        hist = metrics.get("history", [])
+        if hist:
+            hist_path = out_dir / run_name / "training_history.json"
+            hist_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(hist, f, indent=2)
+            print(f"  [History] {len(hist)} 条 -> {hist_path}")
 
         inner = model.model if hasattr(model, "model") else model
         n_params = count_params(inner)
@@ -146,7 +174,7 @@ def main():
         })
         print(f"  loss={metrics['loss']:.6f} rel_l2={metrics['rel_l2']:.6f} test_mse={metrics['test_mse']:.6f} time={elapsed:.1f}s")
 
-    epochs_val = train_cfg.get("epochs", 15)
+    epochs_val = args.epochs if args.epochs is not None else train_cfg.get("epochs", 15)
     csv_path = out_dir / f"stage7_summary_epochs{epochs_val}.csv"
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("mode,params,time_s,loss,rel_l2,test_mse\n")

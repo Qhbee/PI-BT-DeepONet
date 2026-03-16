@@ -1,7 +1,9 @@
-"""Stage 8: Trunk extension experiments - fnn, pod, ex with Transformer + Bayesian."""
+"""Stage 8: Trunk extension experiments - fnn, pod, ex, ex_v2 with Transformer + Bayesian."""
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
@@ -20,11 +22,23 @@ from main import _build_model
 ULTRA = os.environ.get("STAGE8_ULTRA", "1").lower() in ("1", "true", "yes")
 
 
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--epochs", type=int, default=None, help="Override epochs (default: from config)")
+    p.add_argument("--fast", action="store_true", help="减小 nx/nt（nx=30,nt=31）")
+    p.add_argument("--faster", action="store_true", help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训")
+    p.add_argument("--seed", type=int, default=None, help="Override seed for reproducibility (default: from data_cfg)")
+    p.add_argument("--checkpoint-every", type=int, default=5, help="Save checkpoint every N epochs (0=disable)")
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume (e.g. experiments/stage8/trunk_fnn_transformer_bayes/checkpoints/latest.pt)")
+    return p.parse_args()
+
+
 def count_params(model) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
 def main():
+    args = parse_args()
     out_dir = Path("experiments/stage8")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +56,11 @@ def main():
     train_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
 
+    seed = args.seed if args.seed is not None else data_cfg.get("seed", 123)
+    if args.faster:
+        data_cfg = {**data_cfg, "nx": 15, "nt": 16}
+    elif args.fast:
+        data_cfg = {**data_cfg, "nx": 30, "nt": 31}
     if ULTRA:
         data_cfg = {
             "n_train": 12,
@@ -51,9 +70,9 @@ def main():
             "nt": 11,
             "D": 0.01,
             "k": -0.01,
-            "seed": 123,
+            "seed": seed,
         }
-        train_cfg = {**train_cfg, "epochs": 5, "batch_size": 16, "mc_samples": 2, "eval_mc_samples": 5}
+        train_cfg = {**train_cfg, "epochs": args.epochs if args.epochs is not None else 5, "batch_size": 16, "mc_samples": 2, "eval_mc_samples": 5}
         physics_cfg = {**physics_cfg, "n_collocation": 16, "reaction_k": -0.01}
         base_model_cfg = {
             **base_model_cfg,
@@ -105,7 +124,8 @@ def main():
 
         run_name = f"trunk_{trunk_type}_transformer_bayes"
         print(f"\n{'='*60}")
-        print(f"Stage 8: {run_name}" + (" [ULTRA]" if ULTRA else ""))
+        suf = " [ULTRA]" if ULTRA else (" [FASTER]" if args.faster else (" [FAST]" if args.fast else ""))
+        print(f"Stage 8: {run_name}{suf}")
         print("=" * 60)
 
         model, bayes_method = _build_model(
@@ -124,7 +144,7 @@ def main():
             data,
             case=case,
             lr=train_cfg.get("lr", 0.001),
-            epochs=train_cfg.get("epochs", 15),
+            epochs=args.epochs if args.epochs is not None else train_cfg.get("epochs", 15),
             batch_size=train_cfg.get("batch_size", 128),
             log_dir=str(out_dir / run_name),
             bayes_method=bayes_method,
@@ -139,8 +159,19 @@ def main():
             n_collocation=physics_cfg.get("n_collocation", 256),
             diffusion_D=physics_cfg.get("diffusion_D", 0.01),
             reaction_k=physics_cfg.get("reaction_k", -0.01),
+            seed=seed,
+            checkpoint_every=args.checkpoint_every,
+            resume_from=args.resume if (args.resume and run_name in args.resume) else None,
         )
         elapsed = time.perf_counter() - t0
+
+        # 保存每 epoch 的 loss/rel_l2/test_mse 历史
+        hist = metrics.get("history", [])
+        if hist:
+            hist_path = out_dir / run_name / "training_history.json"
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(hist, f, indent=2)
+            print(f"  [History] {len(hist)} 条 -> {hist_path}")
 
         inner = model.model if hasattr(model, "model") else model
         n_params = count_params(inner)
@@ -154,7 +185,7 @@ def main():
         })
         print(f"  loss={metrics['loss']:.6f} rel_l2={metrics['rel_l2']:.6f} test_mse={metrics['test_mse']:.6f} time={elapsed:.1f}s")
 
-    epochs_val = train_cfg.get("epochs", 15)
+    epochs_val = args.epochs if args.epochs is not None else train_cfg.get("epochs", 15)
     csv_path = out_dir / f"stage8_summary_epochs{epochs_val}.csv"
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("mode,params,time_s,loss,rel_l2,test_mse\n")

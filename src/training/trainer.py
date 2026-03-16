@@ -1,10 +1,12 @@
-"""Trainer for DeepONet with TensorBoard."""
+"""Trainer for DeepONet with TensorBoard and checkpoint/resume."""
 
 from __future__ import annotations
 
 import math
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
@@ -262,11 +264,19 @@ def train_operator(
     pressure_gauge_weight: float = 0.0,
     progress_unit: str = "batch",
     progress_mininterval: float = 0.5,
+    checkpoint_every: int = 0,
+    checkpoint_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    seed: int | None = None,
 ):
     """Generic trainer for single-output or multi-output operator tasks.
 
     progress_unit: "epoch" (one step per epoch) or "batch" (one step per batch, finer)
     progress_mininterval: min seconds between progress bar updates (reduce flicker)
+    checkpoint_every: save checkpoint every N epochs (0=disable)
+    checkpoint_dir: where to save checkpoints (default: log_dir/checkpoints)
+    resume_from: path to checkpoint to resume training
+    seed: random seed for reproducibility (saved in checkpoint)
     """
     if uq_mode is not None:
         bayes_method = uq_mode
@@ -275,6 +285,32 @@ def train_operator(
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     mse = nn.MSELoss()
+
+    start_epoch = 0
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+    if resume_from is not None:
+        ckpt_path = Path(resume_from)
+        if ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+            model.load_state_dict(ckpt["model_state_dict"], strict=True)
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt.get("epoch", 0)
+            if "rng_state" in ckpt:
+                torch.set_rng_state(ckpt["rng_state"].cpu())
+            if "np_rng" in ckpt:
+                np.random.set_state(ckpt["np_rng"])
+            if "py_rng" in ckpt:
+                random.setstate(ckpt["py_rng"])
+            print(f"[Resume] from epoch {start_epoch}")
+        else:
+            print(f"[Warn] resume_from not found: {resume_from}")
 
     u_train = torch.from_numpy(data["u_train"]).float()
     y_train = torch.from_numpy(data["y_train"]).float()
@@ -331,6 +367,9 @@ def train_operator(
 
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else log_dir / "checkpoints"
+    if checkpoint_every > 0:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir)
 
     use_pde = pi_constraint != "none" and pi_weight > 0
@@ -339,13 +378,14 @@ def train_operator(
     use_ic = ic_weight > 0 and not skip_bc_ic_for_hard
 
     last_metrics = {"loss": float("nan"), "rel_l2": float("nan"), "test_mse": float("nan")}
+    history: list[dict] = []
 
     if progress_unit == "batch":
-        total_steps = epochs * num_batches
+        total_steps = (epochs - start_epoch) * num_batches
         pbar = tqdm(total=total_steps, desc=f"Training[{case}]", ncols=120, mininterval=progress_mininterval, maxinterval=10, unit="batch")
-        epoch_iter: range = range(epochs)
+        epoch_iter: range = range(start_epoch, epochs)
     else:
-        pbar = tqdm(range(epochs), desc=f"Training[{case}]", ncols=120, mininterval=progress_mininterval, maxinterval=10, unit="epoch")
+        pbar = tqdm(range(start_epoch, epochs), desc=f"Training[{case}]", ncols=120, mininterval=progress_mininterval, maxinterval=10, unit="epoch")
         epoch_iter = pbar
 
     for epoch in epoch_iter:
@@ -463,6 +503,7 @@ def train_operator(
         avg_pde = epoch_pde / n_batches_epoch if use_pde else 0.0
         avg_bc = epoch_bc / n_batches_epoch if use_bc else 0.0
         avg_ic = epoch_ic / n_batches_epoch if use_ic else 0.0
+        history.append({"epoch": epoch + 1, "loss": avg_loss, "rel_l2": last_metrics.get("rel_l2"), "test_mse": last_metrics.get("test_mse")})
         writer.add_scalar("loss/train", avg_loss, epoch)
         writer.add_scalar("loss/train_nll", avg_nll, epoch)
         writer.add_scalar("loss/train_divergence", avg_div, epoch)
@@ -505,6 +546,8 @@ def train_operator(
 
                 writer.add_scalar("loss/test_mse", test_mse, epoch)
                 writer.add_scalar("metric/rel_l2", rel_l2.item(), epoch)
+                history[-1]["rel_l2"] = rel_l2.item()
+                history[-1]["test_mse"] = test_mse
                 if n_out > 1:
                     for i in range(n_out):
                         comp_mse = mse(pred_test[..., i], s_test_dev[..., i]).item()
@@ -520,7 +563,27 @@ def train_operator(
                 print(f"  Epoch {epoch+1}: loss={avg_loss:.6f}, rel_l2={rel_l2.item():.6f}", flush=True)
         last_metrics["loss"] = avg_loss
 
+        if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
+            ckpt = {
+                "epoch": epoch + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": avg_loss,
+                "rel_l2": last_metrics.get("rel_l2"),
+                "test_mse": last_metrics.get("test_mse"),
+                "rng_state": torch.get_rng_state(),
+                "np_rng": np.random.get_state(),
+                "py_rng": random.getstate(),
+                "seed": seed,
+            }
+            ckpt_path = ckpt_dir / f"epoch_{epoch+1}.pt"
+            torch.save(ckpt, ckpt_path)
+            latest_path = ckpt_dir / "latest.pt"
+            torch.save(ckpt, latest_path)
+            print(f"  [Checkpoint] saved epoch {epoch+1} -> {ckpt_path}")
+
     writer.close()
+    last_metrics["history"] = history
     return model, last_metrics
 
 
@@ -544,6 +607,10 @@ def train_antiderivative(
     ic_weight: float = 0.0,
     physics_mode: str = "standard_pi",
     n_collocation: int = 256,
+    seed: int | None = None,
+    checkpoint_every: int = 0,
+    checkpoint_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
 ):
     """Backward-compatible antiderivative trainer wrapper."""
     return train_operator(
@@ -567,4 +634,8 @@ def train_antiderivative(
         ic_weight=ic_weight,
         physics_mode=physics_mode,
         n_collocation=n_collocation,
+        seed=seed,
+        checkpoint_every=checkpoint_every,
+        checkpoint_dir=checkpoint_dir,
+        resume_from=resume_from,
     )

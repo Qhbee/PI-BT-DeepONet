@@ -1,13 +1,12 @@
-"""Compare 4 combinations: fnn/transformer x deterministic/alpha_vi, 100 epochs."""
+"""Compare 4 combinations: fnn/transformer x deterministic/alpha_vi (Stage 3)."""
 
+import argparse
+import json
 import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from src.models import (
@@ -29,6 +28,13 @@ def count_params(model: torch.nn.Module) -> int:
 
 
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--checkpoint-every", type=int, default=0, help="Save checkpoint every N epochs (0=disable)")
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
+    args = p.parse_args()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     data = generate_antiderivative_data(
         n_train=300,
@@ -36,7 +42,7 @@ def main():
         n_sensors=50,
         n_points_per_sample=10,
         length_scale=0.5,
-        seed=42,
+        seed=args.seed,
     )
 
     output_dim = 20
@@ -101,20 +107,33 @@ def main():
 
         n_params = count_params(model)
         t0 = time.perf_counter()
+        log_dir = root / f"{bayes_method}_{branch_type}"
         _, metrics = train_antiderivative(
             model,
             data,
             lr=0.001,
-            epochs=10,
+            epochs=args.epochs,
             batch_size=64,
-            log_dir=root / f"{bayes_method}_{branch_type}",
+            log_dir=str(log_dir),
             device=device,
             bayes_method=bayes_method,
             alpha=1.0,
             mc_samples=3,
             eval_mc_samples=20,
+            seed=args.seed,
+            checkpoint_every=args.checkpoint_every,
+            resume_from=args.resume if (args.resume and f"{bayes_method}_{branch_type}" in args.resume) else None,
         )
         elapsed = time.perf_counter() - t0
+
+        # 保存每 epoch 的 loss/rel_l2/test_mse 历史
+        hist = metrics.get("history", [])
+        if hist:
+            hist_path = Path(log_dir) / "training_history.json"
+            hist_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(hist, f, indent=2)
+            print(f"  [History] {len(hist)} 条 -> {hist_path}")
 
         results.append({
             "bayes_method": bayes_method,
@@ -126,9 +145,17 @@ def main():
             "test_mse": metrics["test_mse"],
         })
 
+    # 保存 CSV
+    csv_path = root / f"stage3_compare_4_combos_epochs{args.epochs}.csv"
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("bayes_method,branch_type,params,time_s,loss,rel_l2,test_mse\n")
+        for r in results:
+            f.write(f"{r['bayes_method']},{r['branch_type']},{r['params']},{r['time_s']:.2f},{r['loss']:.6f},{r['rel_l2']:.6f},{r['test_mse']:.6f}\n")
+    print(f"\n[CSV] {csv_path}")
+
     # 打印表格
     print("\n" + "=" * 95)
-    print("4 组合对比 (10 epochs, antiderivative)")
+    print(f"Stage 3: 4 组合对比 (epochs={args.epochs}, antiderivative)")
     print("=" * 95)
     header = f"{'组合':<30} {'参数量':>12} {'时间(s)':>10} {'时间(min)':>10} {'loss':>12} {'rel_l2':>10} {'test_mse':>12}"
     print(header)

@@ -19,3 +19,6 @@ experiments/
 
 # Artifacts (POD basis, etc.)
 artifacts/
+
+# docs
+docs/

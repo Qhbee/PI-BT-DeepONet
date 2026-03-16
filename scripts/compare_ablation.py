@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import sys
 import time
 from pathlib import Path
@@ -180,6 +181,9 @@ def main():
     parser.add_argument("--case", type=str, default="antiderivative")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--config", type=str, default="")
+    parser.add_argument("--checkpoint-every", type=int, default=0, help="Save checkpoint every N epochs (0=disable)")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
+    parser.add_argument("--seed", type=int, default=None, help="Override seed (default: from data_cfg)")
     args = parser.parse_args()
 
     default_cfg = Path(f"configs/{args.case}.yaml")
@@ -251,8 +255,21 @@ def main():
             ns_nu=physics_cfg.get("ns_nu", 1.0 / 40.0),
             ns_beltrami_nu=physics_cfg.get("ns_beltrami_nu", 1.0),
             pressure_gauge_weight=physics_cfg.get("pressure_gauge_weight", 0.0),
+            seed=args.seed if args.seed is not None else data_cfg.get("seed", 123),
+            checkpoint_every=args.checkpoint_every,
+            resume_from=args.resume if (args.resume and tag in args.resume) else None,
         )
         elapsed = time.perf_counter() - t0
+
+        # 保存每 epoch 的 loss/rel_l2/test_mse 历史
+        hist = metrics.get("history", [])
+        if hist:
+            hist_path = out_dir / tag / "training_history.json"
+            hist_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(hist, f, indent=2)
+            print(f"  [History] {tag}: {len(hist)} 条 -> {hist_path}")
+
         results.append(
             {
                 "tag": tag,
@@ -264,8 +281,16 @@ def main():
             }
         )
 
+    # 保存 CSV
+    csv_path = out_dir / f"stage5_ablation_{case}_epochs{args.epochs}.csv"
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("tag,params,time_s,loss,rel_l2,test_mse\n")
+        for r in results:
+            f.write(f"{r['tag']},{r['params']},{r['time_s']:.2f},{r['loss']:.6f},{r['rel_l2']:.6f},{r['test_mse']:.6f}\n")
+    print(f"\n[CSV] {csv_path}")
+
     print("\n" + "=" * 120)
-    print(f"Ablation results ({case}, epochs={args.epochs})")
+    print(f"Stage 5 Ablation results ({case}, epochs={args.epochs})")
     print("=" * 120)
     print(f"{'Tag':<55} {'Params':>12} {'Time(s)':>10} {'Loss':>12} {'RelL2':>12} {'TestMSE':>14}")
     print("-" * 120)

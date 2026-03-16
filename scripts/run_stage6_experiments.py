@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import sys
 import time
 from pathlib import Path
@@ -95,6 +96,9 @@ def main():
     parser.add_argument("--branch", type=str, choices=["hard", "cls", "both"], default="both")
     parser.add_argument("--fast", action="store_true", help="快速模式：减少 n_train/nx/ny/n_collocation，加速约 10x")
     parser.add_argument("--ultra", action="store_true", help="极速模式：每实验约 30s，n_train=20, nx=ny=16, n_collocation=16")
+    parser.add_argument("--checkpoint-every", type=int, default=0, help="每 N epoch 保存 checkpoint，0=禁用")
+    parser.add_argument("--resume", type=str, default=None, help="续训 checkpoint 路径")
+    parser.add_argument("--seed", type=int, default=None, help="随机种子，覆盖 data_cfg")
     args = parser.parse_args()
 
     if args.ultra:
@@ -166,6 +170,8 @@ def main():
                     physics_cfg["n_collocation"] = 64
                     train_cfg["batch_size"] = 256
 
+            if args.seed is not None:
+                data_cfg["seed"] = args.seed
             generator = get_generator(case)
             if "n_sensors" in inspect.signature(generator).parameters:
                 data_cfg.setdefault("n_sensors", int(model_cfg.get("num_sensors", 32 if args.ultra else 64)))
@@ -189,6 +195,8 @@ def main():
                 n_params = count_params(model)
 
                 t0 = time.perf_counter()
+                log_dir = out_dir / tag
+                resume_path = args.resume if (args.resume and tag in args.resume) else None
                 _, metrics = train_operator(
                     model=model,
                     data=data,
@@ -196,7 +204,7 @@ def main():
                     lr=train_cfg.get("lr", 0.001),
                     epochs=args.epochs,
                     batch_size=train_cfg.get("batch_size", 64),
-                    log_dir=out_dir / tag,
+                    log_dir=str(log_dir),
                     device=device,
                     bayes_method="deterministic",
                     alpha=train_cfg.get("alpha", 1.0),
@@ -214,8 +222,19 @@ def main():
                     ns_nu=physics_cfg.get("ns_nu", 1.0 / 40.0),
                     ns_beltrami_nu=physics_cfg.get("ns_beltrami_nu", 1.0),
                     pressure_gauge_weight=physics_cfg.get("pressure_gauge_weight", 0.0),
+                    checkpoint_every=args.checkpoint_every,
+                    resume_from=resume_path,
+                    seed=data_cfg.get("seed"),
                 )
                 elapsed = time.perf_counter() - t0
+
+                hist = metrics.get("history", [])
+                if hist:
+                    hist_path = log_dir / "training_history.json"
+                    hist_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(hist_path, "w", encoding="utf-8") as f:
+                        json.dump(hist, f, indent=2)
+                    print(f"    [History] {len(hist)} 条 -> {hist_path}")
 
                 results.append({
                     "case": case,
