@@ -268,8 +268,11 @@ def train_operator(
     checkpoint_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     seed: int | None = None,
+    eval_every: int = 5,
 ):
     """Generic trainer for single-output or multi-output operator tasks.
+
+    eval_every: evaluate on test set every N epochs (0=only at end; default 5)
 
     progress_unit: "epoch" (one step per epoch) or "batch" (one step per batch, finer)
     progress_mininterval: min seconds between progress bar updates (reduce flicker)
@@ -511,7 +514,8 @@ def train_operator(
         writer.add_scalar("loss/bc", avg_bc, epoch)
         writer.add_scalar("loss/ic", avg_ic, epoch)
 
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        do_eval = eval_every > 0 and ((epoch + 1) % eval_every == 0 or epoch == 0)
+        if do_eval:
             model.eval()
             with torch.no_grad():
                 y_test_dev = y_test.to(device)
@@ -611,6 +615,7 @@ def train_antiderivative(
     checkpoint_every: int = 0,
     checkpoint_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
+    eval_every: int = 5,
 ):
     """Backward-compatible antiderivative trainer wrapper."""
     return train_operator(
@@ -638,4 +643,5 @@ def train_antiderivative(
         checkpoint_every=checkpoint_every,
         checkpoint_dir=checkpoint_dir,
         resume_from=resume_from,
+        eval_every=eval_every,
     )
