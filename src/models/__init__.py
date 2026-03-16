@@ -10,6 +10,9 @@ from .branch import (
 from .trunk import ExFNNTrunk, ExV2FNNTrunk, FNNTrunk
 from .pod_trunk import FixedPODTrunk, PODTrunk
 from .bayesian import (
+    init_bayesian_fnn_from_deterministic,
+    init_bayesian_transformer_from_deterministic,
+    set_bayesian_prior_from_weights,
     BayesianDeepONet,
     BayesianExDeepONet,
     BayesianExFNNTrunk,

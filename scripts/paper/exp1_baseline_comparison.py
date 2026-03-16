@@ -40,7 +40,7 @@ CONFIG = {
     "transformer_dropout": 0.1,
     "prior_sigma": 1.0,
     # 训练
-    "epochs": 30,
+    "epochs": 60,
     "batch_size": 64,
     "lr": 0.001,
     "pi_weight": 0.1,
@@ -50,6 +50,12 @@ CONFIG = {
     # 贝叶斯
     "alpha": 1.0,
     "mc_samples": 3,
+    "b_deeponet_pretrain": True,  # b_deeponet 是否先用 vanilla 预训练再贝叶斯微调
+    "b_deeponet_pretrain_ratio": 2 / 3,  # 预训练占比；2/3 → 20 预训练 + 10 贝叶斯
+    "b_deeponet_reuse_vanilla": True,  # 若 vanilla_deeponet 已运行，直接加载其 checkpoint 复用
+    "pi_bt_deeponet_pretrain": True,  # pi_bt_deeponet 是否先用 transformer 预训练
+    "pi_bt_deeponet_pretrain_ratio": 5 / 6,  # 5/6 → 25 预训练 + 5 贝叶斯
+    "prior_sigma_pretrained": 0.1,  # 预训练后先验 N(μ_pretrained, σ)，σ 小则 KL 更强保留预训练解
     "eval_mc_samples": 20,
     "eval_every_bayes": 10,
     "eval_every_det": 5,
@@ -58,10 +64,10 @@ CONFIG = {
 }
 
 MODELS = [
-    ("vanilla_deeponet", False, False, "fnn"),
-    ("pi_deeponet", True, False, "fnn"),
+    # ("vanilla_deeponet", False, False, "fnn"),
+    # ("pi_deeponet", True, False, "fnn"),
     ("b_deeponet", False, True, "fnn"),
-    ("transformer_deeponet", False, False, "transformer"),
+    # ("transformer_deeponet", False, False, "transformer"),
     ("pi_bt_deeponet", True, True, "transformer"),
 ]
 
@@ -143,6 +149,9 @@ def main():
         FNNBranch,
         FNNTrunk,
         TransformerBranch,
+        init_bayesian_fnn_from_deterministic,
+        init_bayesian_transformer_from_deterministic,
+        set_bayesian_prior_from_weights,
     )
     from src.data.generators.antiderivative import generate_antiderivative_data
     from src.training.trainer import train_antiderivative
@@ -171,10 +180,114 @@ def main():
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     print(f"[Config] {config_path}")
 
+    exp_dir = Path(cfg["experiment_dir"])
+    prev_runs = [r for r in exp_dir.iterdir() if r.is_dir() and r.name.startswith("run_") and r != exp_root]
+    prev_run = max(prev_runs, key=lambda x: x.name) if prev_runs else None
+
     results = []
 
     for name, use_pi, use_bayes, branch_type in MODELS:
         print(f"\n{'='*60}\n{name}\n{'='*60}")
+
+        pretrain_model = None
+        bayes_epochs = cfg["epochs"]  # 无预训练时用满 epochs
+        # b_deeponet: 优先复用 vanilla_deeponet 的 checkpoint
+        if branch_type == "fnn" and use_bayes and cfg.get("b_deeponet_pretrain", False):
+            ratio = cfg.get("b_deeponet_pretrain_ratio", 0.5)
+            pretrain_epochs = int(cfg["epochs"] * ratio)
+            bayes_epochs = cfg["epochs"] - pretrain_epochs
+            vanilla_ckpt = exp_root / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
+            if not vanilla_ckpt.exists() and prev_run is not None:
+                vanilla_ckpt = prev_run / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
+            if cfg.get("b_deeponet_reuse_vanilla", True) and vanilla_ckpt.exists():
+                print(f"  [Pretrain] 复用 {vanilla_ckpt.parent.parent.parent.name}/vanilla_deeponet epoch_{pretrain_epochs}...")
+                vanilla_branch = FNNBranch(cfg["num_sensors"], cfg["branch_hidden"], cfg["output_dim"])
+                vanilla_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
+                pretrain_model = DeepONet(vanilla_branch, vanilla_trunk, cfg["output_dim"], bias=True)
+                ckpt = torch.load(vanilla_ckpt, map_location=device, weights_only=False)
+                pretrain_model.load_state_dict(ckpt["model_state_dict"], strict=True)
+            else:
+                print(f"  [Pretrain] vanilla 预训练 {pretrain_epochs} epochs，贝叶斯微调 {bayes_epochs} epochs（总 {cfg['epochs']}）...")
+                vanilla_branch = FNNBranch(cfg["num_sensors"], cfg["branch_hidden"], cfg["output_dim"])
+                vanilla_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
+                pretrain_model = DeepONet(vanilla_branch, vanilla_trunk, cfg["output_dim"], bias=True)
+                pretrain_log = exp_root / name / "_pretrain"
+                pretrain_log.mkdir(parents=True, exist_ok=True)
+                train_antiderivative(
+                    pretrain_model,
+                    data,
+                    lr=cfg["lr"],
+                    epochs=pretrain_epochs,
+                    batch_size=cfg["batch_size"],
+                    log_dir=str(pretrain_log),
+                    device=device,
+                    bayes_method="deterministic",
+                    pi_constraint="none",
+                    pi_weight=0.0,
+                    bc_weight=0.0,
+                    ic_weight=0.0,
+                    n_collocation=0,
+                    seed=cfg["seed"],
+                    checkpoint_every=0,
+                    eval_every=cfg["eval_every_det"],
+                )
+            print("  [Pretrain] 完成，初始化 b_deeponet...")
+        # pi_bt_deeponet: 用 transformer+PI 预训练（带 PI 约束，与微调目标一致）
+        elif branch_type == "transformer" and use_bayes and cfg.get("pi_bt_deeponet_pretrain", False):
+            ratio = cfg.get("pi_bt_deeponet_pretrain_ratio", 5 / 6)
+            pretrain_epochs = int(cfg["epochs"] * ratio)
+            bayes_epochs = cfg["epochs"] - pretrain_epochs
+            pi_bt_pretrain_ckpt = exp_root / name / "_pretrain" / "pretrain_final.pt"
+            if not pi_bt_pretrain_ckpt.exists() and prev_run is not None:
+                pi_bt_pretrain_ckpt = prev_run / name / "_pretrain" / "pretrain_final.pt"
+            if pi_bt_pretrain_ckpt.exists():
+                print(f"  [Pretrain] 复用 {pi_bt_pretrain_ckpt.parent.parent.parent.name}/{name}/_pretrain...")
+                trans_branch = TransformerBranch(
+                    cfg["num_sensors"],
+                    cfg["output_dim"],
+                    d_model=cfg["transformer_d_model"],
+                    nhead=cfg["transformer_nhead"],
+                    num_layers=cfg["transformer_num_layers"],
+                    dropout=cfg["transformer_dropout"],
+                )
+                trans_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
+                pretrain_model = DeepONet(trans_branch, trans_trunk, cfg["output_dim"], bias=True)
+                ckpt = torch.load(pi_bt_pretrain_ckpt, map_location=device, weights_only=False)
+                pretrain_model.load_state_dict(ckpt["model_state_dict"], strict=True)
+            else:
+                print(f"  [Pretrain] transformer+PI 预训练 {pretrain_epochs} epochs，贝叶斯微调 {bayes_epochs} epochs（总 {cfg['epochs']}）...")
+                trans_branch = TransformerBranch(
+                    cfg["num_sensors"],
+                    cfg["output_dim"],
+                    d_model=cfg["transformer_d_model"],
+                    nhead=cfg["transformer_nhead"],
+                    num_layers=cfg["transformer_num_layers"],
+                    dropout=cfg["transformer_dropout"],
+                )
+                trans_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
+                pretrain_model = DeepONet(trans_branch, trans_trunk, cfg["output_dim"], bias=True)
+                pretrain_log = exp_root / name / "_pretrain"
+                pretrain_log.mkdir(parents=True, exist_ok=True)
+                train_antiderivative(
+                    pretrain_model,
+                    data,
+                    lr=cfg["lr"],
+                    epochs=pretrain_epochs,
+                    batch_size=cfg["batch_size"],
+                    log_dir=str(pretrain_log),
+                    device=device,
+                    bayes_method="deterministic",
+                    pi_constraint="antiderivative",
+                    pi_weight=cfg["pi_weight"],
+                    bc_weight=cfg["bc_weight"],
+                    ic_weight=cfg["ic_weight"],
+                    n_collocation=cfg["n_collocation"],
+                    seed=cfg["seed"],
+                    checkpoint_every=0,
+                    eval_every=cfg["eval_every_det"],
+                )
+                torch.save({"model_state_dict": pretrain_model.state_dict()}, pretrain_log / "pretrain_final.pt")
+            print("  [Pretrain] 完成，初始化 pi_bt_deeponet...")
 
         if branch_type == "fnn":
             if use_bayes:
@@ -191,6 +304,11 @@ def main():
                     prior_sigma=cfg["prior_sigma"],
                 )
                 model = BayesianDeepONet(branch, trunk, bias=True, min_noise=1e-3)
+                if pretrain_model is not None:
+                    model.to(device)
+                    pretrain_model.to(device)
+                    init_bayesian_fnn_from_deterministic(model, pretrain_model, rho_init=-5.0)
+                    set_bayesian_prior_from_weights(model, cfg.get("prior_sigma_pretrained"))
             else:
                 branch = FNNBranch(cfg["num_sensors"], cfg["branch_hidden"], cfg["output_dim"])
                 trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
@@ -213,6 +331,11 @@ def main():
                     prior_sigma=cfg["prior_sigma"],
                 )
                 model = BayesianDeepONet(branch, trunk, bias=True, min_noise=1e-3)
+                if pretrain_model is not None:
+                    model.to(device)
+                    pretrain_model.to(device)
+                    init_bayesian_transformer_from_deterministic(model, pretrain_model, rho_init=-5.0)
+                    set_bayesian_prior_from_weights(model, cfg.get("prior_sigma_pretrained"))
             else:
                 branch = TransformerBranch(
                     cfg["num_sensors"],
@@ -236,7 +359,7 @@ def main():
             model,
             data,
             lr=cfg["lr"],
-            epochs=cfg["epochs"],
+            epochs=bayes_epochs if (use_bayes and pretrain_model is not None) else cfg["epochs"],
             batch_size=cfg["batch_size"],
             log_dir=str(log_dir),
             device=device,

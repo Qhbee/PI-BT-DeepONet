@@ -35,6 +35,10 @@ class BayesianLinear(nn.Module):
             self.register_parameter("bias_mu", None)
             self.register_parameter("bias_rho", None)
 
+        # 数据依赖先验 N(μ_pretrained, σ)：None 时用 N(0, σ)
+        self.register_buffer("prior_weight_mean", None)
+        self.register_buffer("prior_bias_mean", None)
+
     @staticmethod
     def _sigma_from_rho(rho: torch.Tensor) -> torch.Tensor:
         return F.softplus(rho) + 1e-6
@@ -61,13 +65,15 @@ class BayesianLinear(nn.Module):
             return zero, zero
 
         prior_sigma = torch.full_like(weight, self.prior_sigma)
-        log_prior = _log_gaussian(weight, torch.zeros_like(weight), prior_sigma).sum()
+        w_prior_center = self.prior_weight_mean if self.prior_weight_mean is not None else torch.zeros_like(weight)
+        log_prior = _log_gaussian(weight, w_prior_center, prior_sigma).sum()
         weight_sigma = self._sigma_from_rho(self.weight_rho)
         log_variational = _log_gaussian(weight, self.weight_mu, weight_sigma).sum()
 
         if bias is not None and self.bias_mu is not None and self.bias_rho is not None:
             bias_prior_sigma = torch.full_like(bias, self.prior_sigma)
-            log_prior = log_prior + _log_gaussian(bias, torch.zeros_like(bias), bias_prior_sigma).sum()
+            b_prior_center = self.prior_bias_mean if self.prior_bias_mean is not None else torch.zeros_like(bias)
+            log_prior = log_prior + _log_gaussian(bias, b_prior_center, bias_prior_sigma).sum()
             bias_sigma = self._sigma_from_rho(self.bias_rho)
             log_variational = log_variational + _log_gaussian(bias, self.bias_mu, bias_sigma).sum()
 
@@ -728,3 +734,136 @@ class BayesianExDeepONet(nn.Module):
             pred_mean = pred_mean + self.bias
         pred_std = torch.ones_like(pred_mean) * (F.softplus(self.noise_unconstrained) + self.min_noise)
         return pred_mean, pred_std, lp_b + lp_t, lq_b + lq_t
+
+
+def init_bayesian_fnn_from_deterministic(
+    bayes_model: BayesianDeepONet,
+    det_model: nn.Module,
+    rho_init: float = -5.0,
+) -> None:
+    """用确定性 DeepONet (FNN branch+trunk) 的权重初始化 BayesianDeepONet 的 mu，rho 设为 rho_init。"""
+    det_branch = det_model.branch
+    det_trunk = det_model.trunk
+    bayes_branch = bayes_model.branch
+    bayes_trunk = bayes_model.trunk
+
+    def _copy_sequential_to_bayesian_mlp(seq_net: nn.Sequential, bayes_mlp: BayesianMLP) -> None:
+        linear_layers = [m for m in seq_net if isinstance(m, nn.Linear)]
+        assert len(linear_layers) == len(bayes_mlp.layers), (
+            f"Layer count mismatch: {len(linear_layers)} vs {len(bayes_mlp.layers)}"
+        )
+        for det_lin, bayes_lin in zip(linear_layers, bayes_mlp.layers):
+            assert isinstance(bayes_lin, BayesianLinear)
+            bayes_lin.weight_mu.data.copy_(det_lin.weight.data)
+            bayes_lin.weight_rho.data.fill_(rho_init)
+            if det_lin.bias is not None:
+                bayes_lin.bias_mu.data.copy_(det_lin.bias.data)
+                bayes_lin.bias_rho.data.fill_(rho_init)
+
+    _copy_sequential_to_bayesian_mlp(det_branch.net, bayes_branch.net)
+    _copy_sequential_to_bayesian_mlp(det_trunk.net, bayes_trunk.net)
+
+    if det_model.bias is not None and bayes_model.bias is not None:
+        bayes_model.bias.data.copy_(det_model.bias.data)
+
+
+def init_bayesian_transformer_from_deterministic(
+    bayes_model: BayesianDeepONet,
+    det_model: nn.Module,
+    rho_init: float = -5.0,
+) -> None:
+    """用确定性 DeepONet (Transformer branch + FNN trunk) 初始化 BayesianDeepONet (BayesianTransformer + BayesianFNN)。"""
+    det_branch = det_model.branch
+    det_trunk = det_model.trunk
+    bayes_branch = bayes_model.branch
+    bayes_trunk = bayes_model.trunk
+
+    # Trunk: FNN -> BayesianFNN (同 init_bayesian_fnn_from_deterministic)
+    def _copy_sequential_to_bayesian_mlp(seq_net: nn.Sequential, bayes_mlp: BayesianMLP) -> None:
+        linear_layers = [m for m in seq_net if isinstance(m, nn.Linear)]
+        assert len(linear_layers) == len(bayes_mlp.layers), (
+            f"Trunk layer count mismatch: {len(linear_layers)} vs {len(bayes_mlp.layers)}"
+        )
+        for det_lin, bayes_lin in zip(linear_layers, bayes_mlp.layers):
+            assert isinstance(bayes_lin, BayesianLinear)
+            bayes_lin.weight_mu.data.copy_(det_lin.weight.data)
+            bayes_lin.weight_rho.data.fill_(rho_init)
+            if det_lin.bias is not None:
+                bayes_lin.bias_mu.data.copy_(det_lin.bias.data)
+                bayes_lin.bias_rho.data.fill_(rho_init)
+
+    _copy_sequential_to_bayesian_mlp(det_trunk.net, bayes_trunk.net)
+
+    # Branch: Transformer embed, pool_to_output (Linear -> BayesianLinear)
+    bayes_branch.embed.weight_mu.data.copy_(det_branch.embed.weight.data)
+    bayes_branch.embed.weight_rho.data.fill_(rho_init)
+    if det_branch.embed.bias is not None and bayes_branch.embed.bias_mu is not None:
+        bayes_branch.embed.bias_mu.data.copy_(det_branch.embed.bias.data)
+        bayes_branch.embed.bias_rho.data.fill_(rho_init)
+
+    bayes_branch.pool_to_output.weight_mu.data.copy_(det_branch.pool_to_output.weight.data)
+    bayes_branch.pool_to_output.weight_rho.data.fill_(rho_init)
+    if det_branch.pool_to_output.bias is not None and bayes_branch.pool_to_output.bias_mu is not None:
+        bayes_branch.pool_to_output.bias_mu.data.copy_(det_branch.pool_to_output.bias.data)
+        bayes_branch.pool_to_output.bias_rho.data.fill_(rho_init)
+
+    # Transformer encoder: PyTorch TransformerEncoderLayer -> BayesianTransformerEncoderLayer
+    # det: branch.transformer.encoder (nn.TransformerEncoder) with .layers (ModuleList of TransformerEncoderLayer)
+    # bayes: branch.transformer.layers (ModuleList of BayesianTransformerEncoderLayer)
+    det_enc = det_branch.transformer.encoder
+    d_model = bayes_branch.transformer.layers[0].self_attn.d_model
+    n_layers = len(bayes_branch.transformer.layers)
+    assert len(det_enc.layers) == n_layers, f"Transformer layer count mismatch: {len(det_enc.layers)} vs {n_layers}"
+
+    for i in range(n_layers):
+        det_layer = det_enc.layers[i]
+        bayes_layer = bayes_branch.transformer.layers[i]
+        # self_attn: in_proj_weight (3*d_model, d_model) -> q_proj, k_proj, v_proj
+        in_proj = det_layer.self_attn.in_proj_weight
+        q, k, v = torch.split(in_proj, d_model, dim=0)
+        bayes_layer.self_attn.q_proj.weight_mu.data.copy_(q)
+        bayes_layer.self_attn.q_proj.weight_rho.data.fill_(rho_init)
+        bayes_layer.self_attn.k_proj.weight_mu.data.copy_(k)
+        bayes_layer.self_attn.k_proj.weight_rho.data.fill_(rho_init)
+        bayes_layer.self_attn.v_proj.weight_mu.data.copy_(v)
+        bayes_layer.self_attn.v_proj.weight_rho.data.fill_(rho_init)
+        if det_layer.self_attn.in_proj_bias is not None:
+            qb, kb, vb = torch.split(det_layer.self_attn.in_proj_bias, d_model, dim=0)
+            bayes_layer.self_attn.q_proj.bias_mu.data.copy_(qb)
+            bayes_layer.self_attn.q_proj.bias_rho.data.fill_(rho_init)
+            bayes_layer.self_attn.k_proj.bias_mu.data.copy_(kb)
+            bayes_layer.self_attn.k_proj.bias_rho.data.fill_(rho_init)
+            bayes_layer.self_attn.v_proj.bias_mu.data.copy_(vb)
+            bayes_layer.self_attn.v_proj.bias_rho.data.fill_(rho_init)
+        bayes_layer.self_attn.out_proj.weight_mu.data.copy_(det_layer.self_attn.out_proj.weight.data)
+        bayes_layer.self_attn.out_proj.weight_rho.data.fill_(rho_init)
+        if det_layer.self_attn.out_proj.bias is not None:
+            bayes_layer.self_attn.out_proj.bias_mu.data.copy_(det_layer.self_attn.out_proj.bias.data)
+            bayes_layer.self_attn.out_proj.bias_rho.data.fill_(rho_init)
+        # linear1, linear2 (FFN)
+        bayes_layer.linear1.weight_mu.data.copy_(det_layer.linear1.weight.data)
+        bayes_layer.linear1.weight_rho.data.fill_(rho_init)
+        if det_layer.linear1.bias is not None:
+            bayes_layer.linear1.bias_mu.data.copy_(det_layer.linear1.bias.data)
+            bayes_layer.linear1.bias_rho.data.fill_(rho_init)
+        bayes_layer.linear2.weight_mu.data.copy_(det_layer.linear2.weight.data)
+        bayes_layer.linear2.weight_rho.data.fill_(rho_init)
+        if det_layer.linear2.bias is not None:
+            bayes_layer.linear2.bias_mu.data.copy_(det_layer.linear2.bias.data)
+            bayes_layer.linear2.bias_rho.data.fill_(rho_init)
+
+    if det_model.bias is not None and bayes_model.bias is not None:
+        bayes_model.bias.data.copy_(det_model.bias.data)
+
+
+def set_bayesian_prior_from_weights(model: nn.Module, prior_sigma: float | None = None) -> None:
+    """将先验设为 N(μ_current, σ)，使 KL 将后验拉向当前权重（如预训练解）而非 N(0,1)。
+    prior_sigma: 若提供，则覆盖各层的 prior_sigma，使先验更集中（如 0.1）以更好保留预训练解。"""
+    for m in model.modules():
+        if isinstance(m, BayesianLinear):
+            m.prior_weight_mean = m.weight_mu.detach().clone()
+            if m.bias_mu is not None:
+                m.prior_bias_mean = m.bias_mu.detach().clone()
+            if prior_sigma is not None:
+                m.prior_sigma = prior_sigma
+

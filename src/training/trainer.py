@@ -340,7 +340,8 @@ def train_operator(
     n_points = y_train.shape[1]
     total_samples = n_train * n_points
     num_batches = max(1, math.ceil(total_samples / batch_size))
-    effective_kl_weight = kl_weight if kl_weight is not None else (1.0 / num_batches)
+    # 贝叶斯 KL 权重：1/total_samples 与 VB-DeepONet 一致，避免 KL 过强压制拟合
+    effective_kl_weight = kl_weight if kl_weight is not None else (1.0 / total_samples)
 
     if u_train.dim() == 2:
         u_flat = u_train.unsqueeze(1).expand(-1, n_points, -1).reshape(total_samples, -1)
