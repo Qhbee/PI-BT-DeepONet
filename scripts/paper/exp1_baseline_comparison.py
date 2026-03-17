@@ -61,6 +61,8 @@ CONFIG = {
     "eval_every_det": 5,
     # 输出
     "experiment_dir": "experiments/paper/exp1_baseline_comparison",
+    # 复用开关：改 n_sensors/output_dim 等系数后必须设为 False
+    "reuse_prev_run": False,
 }
 
 MODELS = [
@@ -293,9 +295,12 @@ def main():
         resume_from: Path | None = None
         resume_prev_hist: list[dict] = []
         if not use_bayes:
-            skipped, resume_from = _try_copy_deterministic_from_prev_run(
-                exp_dir, exp_root, name, figures_dir, cfg["epochs"]
-            )
+            if cfg.get("reuse_prev_run", False):
+                skipped, resume_from = _try_copy_deterministic_from_prev_run(
+                    exp_dir, exp_root, name, figures_dir, cfg["epochs"]
+                )
+            else:
+                skipped, resume_from = False, None
             if skipped:
                 with open(exp_root / name / "result.json", encoding="utf-8") as f:
                     model_result = json.load(f)
@@ -318,8 +323,8 @@ def main():
             bayes_epochs = cfg["epochs"] - pretrain_epochs
             pretrain_ckpt = None
             from_prev_run = False
-            # 1) 最近一次有 b_deeponet 预训练的 run
-            prev_b = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/_pretrain/final_model.pt")
+            # 1) 最近一次有 b_deeponet 预训练的 run（需 reuse_prev_run=True）
+            prev_b = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/_pretrain/final_model.pt") if cfg.get("reuse_prev_run", False) else None
             if prev_b is not None:
                 pretrain_ckpt = prev_b / name / "_pretrain" / "final_model.pt"
                 from_prev_run = True
@@ -328,8 +333,8 @@ def main():
                 vanilla_path = exp_root / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
                 if vanilla_path.exists():
                     pretrain_ckpt = vanilla_path
-            # 3) 最近一次有 vanilla_deeponet 的 run（本次未训练 vanilla 时可用）
-            if pretrain_ckpt is None:
+            # 3) 最近一次有 vanilla_deeponet 的 run（需 reuse_prev_run=True）
+            if pretrain_ckpt is None and cfg.get("reuse_prev_run", False):
                 prev_v = _get_latest_run_with_file(
                     exp_dir, exp_root, f"vanilla_deeponet/checkpoints/epoch_{pretrain_epochs}.pt"
                 )
@@ -397,7 +402,8 @@ def main():
             bayes_epochs = cfg["epochs"] - pretrain_epochs
             pretrain_ckpt = exp_root / name / "_pretrain" / "final_model.pt"
             from_prev_run = False
-            if not pretrain_ckpt.exists():
+            prev_run = None
+            if not pretrain_ckpt.exists() and cfg.get("reuse_prev_run", False):
                 prev_run = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/_pretrain/final_model.pt")
                 if prev_run is not None:
                     pretrain_ckpt = prev_run / name / "_pretrain" / "final_model.pt"
