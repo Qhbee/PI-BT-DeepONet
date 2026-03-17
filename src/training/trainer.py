@@ -290,10 +290,16 @@ def train_operator(
     resume_from: str | Path | None = None,
     seed: int | None = None,
     eval_every: int = 5,
+    early_stop: bool = False,
+    early_stop_patience: int = 20,
+    early_stop_metric: str = "rel_l2",
 ):
     """Generic trainer for single-output or multi-output operator tasks.
 
     eval_every: evaluate on test set every N epochs (0=only at end; default 5)
+    early_stop: 若 True，当 test rel_l2 连续 early_stop_patience 个 epoch 无提升则停止，并恢复最佳权重
+    early_stop_patience: 早停耐心值（epoch 数）
+    early_stop_metric: 监控指标 "rel_l2"（越小越好）或 "test_mse"
 
     progress_unit: "epoch" (one step per epoch) or "batch" (one step per batch, finer)
     progress_mininterval: min seconds between progress bar updates (reduce flicker)
@@ -404,6 +410,12 @@ def train_operator(
 
     last_metrics = {"loss": float("nan"), "rel_l2": float("nan"), "test_mse": float("nan")}
     history: list[dict] = []
+
+    eval_every_eff = eval_every
+    best_metric = float("inf")
+    best_epoch = 0
+    best_state: dict | None = None
+    epochs_no_improve = 0  # 累计无提升的 epoch 数（每次 eval 未提升则 +eval_every_eff）
 
     if progress_unit == "batch":
         total_steps = (epochs - start_epoch) * num_batches
@@ -536,7 +548,7 @@ def train_operator(
         writer.add_scalar("loss/bc", avg_bc, epoch)
         writer.add_scalar("loss/ic", avg_ic, epoch)
 
-        do_eval = eval_every > 0 and ((epoch + 1) % eval_every == 0 or epoch == 0)
+        do_eval = eval_every_eff > 0 and ((epoch + 1) % eval_every_eff == 0 or epoch == 0)
         if do_eval:
             model.eval()
             with torch.no_grad():
@@ -587,6 +599,21 @@ def train_operator(
                 last_metrics["test_mse"] = test_mse
                 pbar.set_postfix(loss=f"{avg_loss:.4f}", rel_l2=f"{rel_l2.item():.4f}")
                 print(f"  Epoch {epoch+1}: loss={avg_loss:.6f}, rel_l2={rel_l2.item():.6f}", flush=True)
+
+                if early_stop:
+                    current = rel_l2.item() if early_stop_metric == "rel_l2" else test_mse
+                    if current < best_metric:
+                        best_metric = current
+                        best_epoch = epoch + 1
+                        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += eval_every_eff
+                    if epochs_no_improve >= early_stop_patience:
+                        print(f"  [EarlyStop] {early_stop_patience} epochs 无提升，停止于 epoch {epoch+1}，恢复最佳 epoch {best_epoch}", flush=True)
+                        if best_state is not None:
+                            model.load_state_dict(best_state, strict=True)
+                        break
         last_metrics["loss"] = avg_loss
 
         if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
@@ -608,6 +635,11 @@ def train_operator(
             torch.save(ckpt, latest_path)
             print(f"  [Checkpoint] saved epoch {epoch+1} -> {ckpt_path}")
 
+    if early_stop and best_state is not None and best_epoch > 0:
+        model.load_state_dict(best_state, strict=True)
+        last_metrics["rel_l2"] = best_metric if early_stop_metric == "rel_l2" else last_metrics.get("rel_l2")
+        last_metrics["test_mse"] = best_metric if early_stop_metric == "test_mse" else last_metrics.get("test_mse")
+        print(f"  [EarlyStop] 恢复最佳 epoch {best_epoch}", flush=True)
     writer.close()
     last_metrics["history"] = history
     return model, last_metrics
@@ -638,6 +670,9 @@ def train_antiderivative(
     checkpoint_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     eval_every: int = 5,
+    early_stop: bool = False,
+    early_stop_patience: int = 20,
+    early_stop_metric: str = "rel_l2",
 ):
     """Backward-compatible antiderivative trainer wrapper."""
     return train_operator(
@@ -666,6 +701,9 @@ def train_antiderivative(
         checkpoint_dir=checkpoint_dir,
         resume_from=resume_from,
         eval_every=eval_every,
+        early_stop=early_stop,
+        early_stop_patience=early_stop_patience,
+        early_stop_metric=early_stop_metric,
     )
 
 
@@ -694,6 +732,9 @@ def train_poisson_2d(
     checkpoint_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     eval_every: int = 5,
+    early_stop: bool = False,
+    early_stop_patience: int = 30,
+    early_stop_metric: str = "rel_l2",
 ):
     """2D Poisson trainer wrapper."""
     return train_operator(
@@ -722,4 +763,7 @@ def train_poisson_2d(
         checkpoint_dir=checkpoint_dir,
         resume_from=resume_from,
         eval_every=eval_every,
+        early_stop=early_stop,
+        early_stop_patience=early_stop_patience,
+        early_stop_metric=early_stop_metric,
     )

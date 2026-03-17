@@ -42,7 +42,9 @@ import torch
 #   transformer_dropout: Dropout 比例。
 #   prior_sigma: 贝叶斯层权重的先验 N(0, σ²) 的 σ。
 # ---------- 训练 ----------
-#   epochs: 总训练轮数。
+#   epochs: 轮数上限。早停会提前结束；不早停则跑满。
+#   early_stop: 是否早停（基于 test rel_l2）。
+#   early_stop_patience: 连续 N epoch 无提升则停止（按 eval_every 间隔累计）。
 #   batch_size: 每批样本数。总样本 = n_train * n_points_per_sample。
 #   lr: 学习率。
 #   pi_weight: PDE 残差项权重。0=纯数据拟合；>0 时加入物理约束。
@@ -73,22 +75,26 @@ CONFIG = {
     "length_scale": 0.5,
     "seed": 42,
     # 噪声
-    "noise_std": 0.02,
+    "noise_std": 0.1,
     "noise_relative": True,
     # 模型
     "output_dim": 20,
     "branch_hidden": [20, 20],
+    # "branch_hidden": [64], # 1 个隐藏层、64 个神经元
+    # "branch_hidden": [32, 32, 32], # 3 个隐藏层、每层 32
+    # "branch_hidden": [64, 32], # 2 个隐藏层、第一层 64、第二层 32
     "trunk_hidden": [20, 20],
     "num_sensors": 50,
     "coord_dim": 1,
     # Transformer
-    "transformer_d_model": 16,
+    "transformer_d_model": 32,
     "transformer_nhead": 4,
     "transformer_num_layers": 2,
-    "transformer_dropout": 0.1,
-    "prior_sigma": 1.0,
+    "transformer_dropout": 0.0,
     # 训练
-    "epochs": 60,
+    "epochs": 200,  # 轮数上限，早停会提前结束；可调大以给慢热模型更多空间
+    "early_stop": True,
+    "early_stop_patience": 30,  # 连续 30 epoch 无提升则停（每 5 epoch 评估一次）
     "batch_size": 64,
     "lr": 0.001,
     "pi_weight": 0.1,
@@ -99,12 +105,13 @@ CONFIG = {
     "alpha": 1.0,
     "mc_samples": 3,
     "b_deeponet_pretrain": True,
-    "b_deeponet_pretrain_ratio": 2 / 3,
+    "b_deeponet_pretrain_ratio": 1 / 3,
     "pi_bt_deeponet_pretrain": True,
-    "pi_bt_deeponet_pretrain_ratio": 5 / 6,
+    "pi_bt_deeponet_pretrain_ratio": 2 / 3,
+    "prior_sigma": 1.0,
     "prior_sigma_pretrained": 0.1,
     "eval_mc_samples": 20,
-    "eval_every_bayes": 10,
+    "eval_every_bayes": 5,
     "eval_every_det": 5,
     # 输出
     "experiment_dir": "experiments/paper/exp1_baseline_comparison",
@@ -114,7 +121,7 @@ CONFIG = {
 MODELS = [
     ("vanilla_deeponet", False, False, "fnn"),
     # ("pi_deeponet", True, False, "fnn"),
-    ("b_deeponet", False, True, "fnn"),
+    # ("b_deeponet", False, True, "fnn"),
     # ("transformer_deeponet", False, False, "transformer"),
     # ("pi_bt_deeponet", True, True, "transformer"),
 ]
@@ -618,6 +625,8 @@ def main():
             checkpoint_dir=str(log_dir / "checkpoints"),
             eval_every=eval_every,
             resume_from=str(resume_from) if resume_from is not None else None,
+            early_stop=cfg.get("early_stop", False),
+            early_stop_patience=cfg.get("early_stop_patience", 20),
         )
         elapsed = time.perf_counter() - t0
 

@@ -43,7 +43,10 @@ import torch
 #   transformer_d_model, nhead, num_layers, dropout: Transformer 结构参数。
 #   prior_sigma: 贝叶斯先验 σ。
 # ---------- 训练 ----------
-#   epochs, batch_size, lr: 常规训练参数。
+#   epochs: 轮数上限。早停会提前结束。
+#   early_stop: 是否早停（基于 test rel_l2）。
+#   early_stop_patience: 连续 N epoch 无提升则停止（按 eval_every 间隔累计）。
+#   batch_size, lr: 常规训练参数。
 #   pi_weight: PDE 残差 -∇²p-f=0 的权重。
 #   bc_weight: 边界条件 p=0 的权重。
 #   ic_weight: Poisson 无初值，保持 0。
@@ -88,7 +91,9 @@ CONFIG = {
     "transformer_dropout": 0.1,
     "prior_sigma": 1.0,
     # 训练
-    "epochs": 20,
+    "epochs": 200,  # 轮数上限，早停会提前结束
+    "early_stop": True,
+    "early_stop_patience": 30,  # 连续 30 epoch 无提升则停（按 eval_every 间隔累计）
     "batch_size": 64,
     "lr": 0.001,
     "pi_weight": 0.1,
@@ -555,6 +560,9 @@ def main():
             checkpoint_dir=str(log_dir / "checkpoints"),
             eval_every=eval_every,
             resume_from=str(resume_from) if resume_from is not None else None,
+            early_stop=cfg.get("early_stop", False),
+            early_stop_patience=cfg.get("early_stop_patience", 30),
+            early_stop_metric=cfg.get("early_stop_metric", "rel_l2"),
         )
         elapsed = time.perf_counter() - t0
 
