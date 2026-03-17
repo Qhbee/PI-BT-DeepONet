@@ -129,6 +129,27 @@ def _compute_ic_bc_losses(
         L_bc = mse(p_l, torch.zeros_like(p_l)) + mse(p_r, torch.zeros_like(p_r))
         return L_bc, L_ic
 
+    if case == "poisson_2d":
+        n_edge = n_samples
+        s = torch.rand(batch, n_edge, 1, device=device, dtype=dtype)
+        x0 = torch.zeros_like(s)
+        x1 = torch.ones_like(s)
+        y_btm = torch.cat([s, x0], dim=-1)
+        y_top = torch.cat([s, x1], dim=-1)
+        y_lft = torch.cat([x0, s], dim=-1)
+        y_rgt = torch.cat([x1, s], dim=-1)
+        p_b = _predict(model, u_batch, y_btm, bayes_method=bayes_method, sample=False)
+        p_t = _predict(model, u_batch, y_top, bayes_method=bayes_method, sample=False)
+        p_l = _predict(model, u_batch, y_lft, bayes_method=bayes_method, sample=False)
+        p_r = _predict(model, u_batch, y_rgt, bayes_method=bayes_method, sample=False)
+        if p_b.dim() == 3:
+            p_b = p_b[..., 0]
+            p_t = p_t[..., 0]
+            p_l = p_l[..., 0]
+            p_r = p_r[..., 0]
+        L_bc = mse(p_b, torch.zeros_like(p_b)) + mse(p_t, torch.zeros_like(p_t)) + mse(p_l, torch.zeros_like(p_l)) + mse(p_r, torch.zeros_like(p_r))
+        return L_bc, zero
+
     if case == "darcy":
         n_edge = n_samples
         s = torch.rand(batch, n_edge, 1, device=device, dtype=dtype)
@@ -623,6 +644,62 @@ def train_antiderivative(
         model=model,
         data=data,
         case="antiderivative",
+        lr=lr,
+        epochs=epochs,
+        batch_size=batch_size,
+        log_dir=log_dir,
+        device=device,
+        bayes_method=bayes_method,
+        uq_mode=uq_mode,
+        alpha=alpha,
+        mc_samples=mc_samples,
+        eval_mc_samples=eval_mc_samples,
+        kl_weight=kl_weight,
+        pi_constraint=pi_constraint,
+        pi_weight=pi_weight,
+        bc_weight=bc_weight,
+        ic_weight=ic_weight,
+        physics_mode=physics_mode,
+        n_collocation=n_collocation,
+        seed=seed,
+        checkpoint_every=checkpoint_every,
+        checkpoint_dir=checkpoint_dir,
+        resume_from=resume_from,
+        eval_every=eval_every,
+    )
+
+
+def train_poisson_2d(
+    model: nn.Module,
+    data: dict,
+    lr: float = 0.001,
+    epochs: int = 10000,
+    batch_size: int = 256,
+    log_dir: str | Path = "experiments/poisson_2d",
+    device: str | None = None,
+    bayes_method: str = "deterministic",
+    uq_mode: str | None = None,
+    alpha: float = 1.0,
+    mc_samples: int = 3,
+    eval_mc_samples: int = 20,
+    kl_weight: float | None = None,
+    pi_constraint: str = "none",
+    pi_weight: float = 0.0,
+    bc_weight: float = 0.0,
+    ic_weight: float = 0.0,
+    physics_mode: str = "standard_pi",
+    n_collocation: int = 256,
+    seed: int | None = None,
+    checkpoint_every: int = 0,
+    checkpoint_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    eval_every: int = 5,
+):
+    """2D Poisson trainer wrapper."""
+    return train_operator(
+        model=model,
+        data=data,
+        case="poisson_2d",
         lr=lr,
         epochs=epochs,
         batch_size=batch_size,

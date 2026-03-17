@@ -7,6 +7,55 @@ import torch
 from .ns_residual import beltrami_vp_residual, kovasznay_vp_residual, pressure_gauge_loss
 
 
+def _interp2d_batched(
+    x_sensors: torch.Tensor,
+    u: torch.Tensor,
+    y_query: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Batched 2D bilinear interpolation on a regular grid.
+    x_sensors: (n_sensors, 2) grid points [x,y], u: (batch, n_sensors), y_query: (batch, n, 2).
+    Grid assumed row-major: index = j*nx + i for (x_i, y_j).
+    Returns: (batch, n) interpolated values.
+    """
+    if x_sensors.dim() != 2 or x_sensors.shape[1] != 2:
+        raise ValueError("x_sensors must be (n_sensors, 2) for 2D interpolation.")
+    x_vals = torch.unique(x_sensors[:, 0]).sort().values
+    y_vals = torch.unique(x_sensors[:, 1]).sort().values
+    nx, ny = x_vals.shape[0], y_vals.shape[0]
+    device = u.device
+    dtype = u.dtype
+    x_vals = x_vals.to(device=device, dtype=dtype)
+    y_vals = y_vals.to(device=device, dtype=dtype)
+
+    xq = y_query[..., 0].clamp(x_vals[0], x_vals[-1])
+    yq = y_query[..., 1].clamp(y_vals[0], y_vals[-1])
+
+    idx_x = torch.searchsorted(x_vals, xq, right=False)
+    idx_y = torch.searchsorted(y_vals, yq, right=False)
+    idx_x = torch.clamp(idx_x, 1, nx - 1)
+    idx_y = torch.clamp(idx_y, 1, ny - 1)
+
+    i0, i1 = idx_x - 1, idx_x
+    j0, j1 = idx_y - 1, idx_y
+    x0, x1 = x_vals[i0], x_vals[i1]
+    y0, y1 = y_vals[j0], y_vals[j1]
+    wx = (xq - x0) / (x1 - x0 + 1e-8)
+    wy = (yq - y0) / (y1 - y0 + 1e-8)
+
+    flat_00 = j0 * nx + i0
+    flat_10 = j0 * nx + i1
+    flat_01 = j1 * nx + i0
+    flat_11 = j1 * nx + i1
+
+    u00 = u.gather(1, flat_00)
+    u10 = u.gather(1, flat_10)
+    u01 = u.gather(1, flat_01)
+    u11 = u.gather(1, flat_11)
+
+    return (1 - wx) * (1 - wy) * u00 + wx * (1 - wy) * u10 + (1 - wx) * wy * u01 + wx * wy * u11
+
+
 def _interp1d_batched(
     x_sensors: torch.Tensor,
     u: torch.Tensor,
@@ -168,6 +217,36 @@ def _diffusion_reaction_residual(
     x_query = y_req[..., 1]
     source_x = _interp1d_batched(x_sensors, u, x_query.detach())
     residual = d_dt - D * d_xx - k_reaction * pred - source_x
+    return (residual**2).mean()
+
+
+def _poisson_2d_residual(
+    model: torch.nn.Module,
+    u: torch.Tensor,
+    y: torch.Tensor,
+    x_sensors: torch.Tensor,
+    sample: bool = True,
+) -> torch.Tensor:
+    """
+    2D Poisson: -∇²p = f on [0,1]², p=0 on boundary.
+    Residual: -∇²p - f = 0, with f interpolated from u at query points.
+    """
+    y_req = y.detach().clone().requires_grad_(True)
+    pred = _predict(model, u, y_req, sample=sample)
+    if pred.dim() == 3:
+        pred = pred.squeeze(-1)
+    grad_pred = torch.autograd.grad(
+        outputs=pred.sum(),
+        inputs=y_req,
+        create_graph=True,
+    )[0]
+    px = grad_pred[..., 0]
+    py = grad_pred[..., 1]
+    pxx = torch.autograd.grad(outputs=px.sum(), inputs=y_req, create_graph=True)[0][..., 0]
+    pyy = torch.autograd.grad(outputs=py.sum(), inputs=y_req, create_graph=True)[0][..., 1]
+    laplacian = pxx + pyy
+    f_at_query = _interp2d_batched(x_sensors, u, y_req.detach())
+    residual = -laplacian - f_at_query
     return (residual**2).mean()
 
 
@@ -364,6 +443,10 @@ def compute_residual(
             k_reaction=reaction_k,
             sample=sample,
         )
+    if pde_type == "poisson_2d":
+        if x_sensors is None:
+            raise ValueError("x_sensors is required for poisson_2d residual.")
+        return _poisson_2d_residual(model, u, y, x_sensors, sample=sample)
     if pde_type == "darcy":
         return _darcy_residual(model, u, y, sample=sample)
     if pde_type == "ns_kovasznay":
