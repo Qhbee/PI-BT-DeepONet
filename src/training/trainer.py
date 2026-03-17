@@ -300,7 +300,7 @@ def train_operator(
     if resume_from is not None:
         ckpt_path = Path(resume_from)
         if ckpt_path.exists():
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             model.load_state_dict(ckpt["model_state_dict"], strict=True)
             if "optimizer_state_dict" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])

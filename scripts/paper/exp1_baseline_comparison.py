@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,8 +52,7 @@ CONFIG = {
     "alpha": 1.0,
     "mc_samples": 3,
     "b_deeponet_pretrain": True,  # b_deeponet 是否先用 vanilla 预训练再贝叶斯微调
-    "b_deeponet_pretrain_ratio": 2 / 3,  # 预训练占比；2/3 → 20 预训练 + 10 贝叶斯
-    "b_deeponet_reuse_vanilla": True,  # 若 vanilla_deeponet 已运行，直接加载其 checkpoint 复用
+    "b_deeponet_pretrain_ratio": 2 / 3,  # 预训练占比；2/3 → 40 预训练 + 20 贝叶斯
     "pi_bt_deeponet_pretrain": True,  # pi_bt_deeponet 是否先用 transformer 预训练
     "pi_bt_deeponet_pretrain_ratio": 5 / 6,  # 5/6 → 25 预训练 + 5 贝叶斯
     "prior_sigma_pretrained": 0.1,  # 预训练后先验 N(μ_pretrained, σ)，σ 小则 KL 更强保留预训练解
@@ -64,16 +64,118 @@ CONFIG = {
 }
 
 MODELS = [
-    # ("vanilla_deeponet", False, False, "fnn"),
+    ("vanilla_deeponet", False, False, "fnn"),
     # ("pi_deeponet", True, False, "fnn"),
     ("b_deeponet", False, True, "fnn"),
     # ("transformer_deeponet", False, False, "transformer"),
-    ("pi_bt_deeponet", True, True, "transformer"),
+    # ("pi_bt_deeponet", True, True, "transformer"),
 ]
 
 
 def count_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
+
+
+def _get_latest_prev_run(exp_dir: Path, current_run: Path) -> Path | None:
+    """返回最近一次（时间戳最大）的 run 目录，排除当前 run。"""
+    if not exp_dir.exists():
+        return None
+    runs = sorted(p for p in exp_dir.iterdir() if p.is_dir() and p.name.startswith("run_"))
+    runs = [r for r in runs if r != current_run]
+    return runs[-1] if runs else None
+
+
+def _load_pretrain_hist_from_tb(pretrain_dir: Path, max_epochs: int) -> list[dict]:
+    """从 tensorboard events 读取预训练历史（当 training_history.json 不存在时备选）。"""
+    try:
+        from tensorboard.backend.event_processing import event_accumulator
+    except ImportError:
+        return []
+    if not pretrain_dir.exists():
+        return []
+    try:
+        ea = event_accumulator.EventAccumulator(str(pretrain_dir))
+        ea.Reload()
+    except Exception:
+        return []
+    tags = ea.Tags().get("scalars", [])
+    loss_data = {e.step: e.value for e in ea.Scalars("loss/train")} if "loss/train" in tags else {}
+    rel_data = {e.step: e.value for e in ea.Scalars("metric/rel_l2")} if "metric/rel_l2" in tags else {}
+    mse_data = {e.step: e.value for e in ea.Scalars("loss/test_mse")} if "loss/test_mse" in tags else {}
+    if not loss_data:
+        return []
+    steps = sorted(s for s in loss_data if s < max_epochs)
+    return [
+        {
+            "epoch": s + 1,
+            "loss": loss_data[s],
+            "rel_l2": rel_data.get(s),
+            "test_mse": mse_data.get(s),
+        }
+        for s in steps
+    ]
+
+
+def _get_latest_run_with_file(exp_dir: Path, current_run: Path, rel_path: str) -> Path | None:
+    """返回最近一次包含 rel_path 的 run 目录（从新到旧找第一个有的）。"""
+    if not exp_dir.exists():
+        return None
+    runs = sorted(p for p in exp_dir.iterdir() if p.is_dir() and p.name.startswith("run_"))
+    runs = [r for r in runs if r != current_run]
+    for r in reversed(runs):
+        if (r / rel_path).exists():
+            return r
+    return None
+
+
+def _try_copy_deterministic_from_prev_run(
+    exp_dir: Path, exp_root: Path, name: str, figures_dir: Path, target_epochs: int
+) -> tuple[bool, Path | None]:
+    """
+    确定性模型：拷贝上次 run 的结果到本次。
+    返回 (skipped, resume_from):
+    - skipped=True: 已有完整结果（epoch_{target_epochs}.pt），跳过训练
+    - resume_from 非空: 有部分结果，从该 checkpoint 继续训练到 target_epochs
+    - 否则: 无可用结果，需从头训练
+    """
+    dst = exp_root / name
+    ckpt_dir = dst / "checkpoints"
+    target_ckpt = ckpt_dir / f"epoch_{target_epochs}.pt"
+
+    if target_ckpt.exists():
+        return True, None
+
+    prev_run = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/checkpoints")
+    if prev_run is None:
+        return False, None
+
+    src = prev_run / name
+    if not src.is_dir():
+        return False, None
+
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    prev_fig = prev_run / "figures" / f"{name}.png"
+    if prev_fig.exists():
+        shutil.copy2(prev_fig, figures_dir / f"{name}.png")
+
+    if target_ckpt.exists():
+        print(f"  [Reuse] 拷贝上次 run 的 {name} 结果到本次目录，跳过训练")
+        return True, None
+
+    max_epoch = 0
+    for f in ckpt_dir.glob("epoch_*.pt"):
+        try:
+            e = int(f.stem.split("_")[1])
+            max_epoch = max(max_epoch, e)
+        except (ValueError, IndexError):
+            pass
+    if max_epoch > 0 and max_epoch < target_epochs:
+        resume_ckpt = ckpt_dir / f"epoch_{max_epoch}.pt"
+        if resume_ckpt.exists():
+            print(f"  [Reuse] 拷贝上次 run 的 {name}，从 epoch {max_epoch} 继续训练到 {target_epochs}")
+            return False, resume_ckpt
+
+    return False, None
 
 
 def _add_noise(data: dict, noise_std: float, seed: int | None) -> None:
@@ -180,32 +282,83 @@ def main():
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     print(f"[Config] {config_path}")
 
-    exp_dir = Path(cfg["experiment_dir"])
-    prev_runs = [r for r in exp_dir.iterdir() if r.is_dir() and r.name.startswith("run_") and r != exp_root]
-    prev_run = max(prev_runs, key=lambda x: x.name) if prev_runs else None
-
     results = []
 
+    exp_dir = Path(cfg["experiment_dir"])
     for name, use_pi, use_bayes, branch_type in MODELS:
         print(f"\n{'='*60}\n{name}\n{'='*60}")
 
+        # 确定性模型：拷贝上次结果，完整则跳过；部分则从 checkpoint 继续训练
+        # 贝叶斯模型：不拷贝完整结果，只复用确定性预训练部分
+        resume_from: Path | None = None
+        resume_prev_hist: list[dict] = []
+        if not use_bayes:
+            skipped, resume_from = _try_copy_deterministic_from_prev_run(
+                exp_dir, exp_root, name, figures_dir, cfg["epochs"]
+            )
+            if skipped:
+                with open(exp_root / name / "result.json", encoding="utf-8") as f:
+                    model_result = json.load(f)
+                results.append(model_result)
+                continue
+            if resume_from is not None:
+                prev_hist_path = exp_root / name / "training_history.json"
+                if prev_hist_path.exists():
+                    with open(prev_hist_path, encoding="utf-8") as f:
+                        resume_prev_hist = json.load(f)
+
         pretrain_model = None
+        pretrain_hist: list[dict] = []
+        pretrain_epochs = 0
         bayes_epochs = cfg["epochs"]  # 无预训练时用满 epochs
-        # b_deeponet: 优先复用 vanilla_deeponet 的 checkpoint
+        # b_deeponet: 1) 优先复用上次 run 的 b_deeponet 预训练；2) 否则用本次 vanilla 的 epoch 2/3；3) 否则自训
         if branch_type == "fnn" and use_bayes and cfg.get("b_deeponet_pretrain", False):
             ratio = cfg.get("b_deeponet_pretrain_ratio", 0.5)
             pretrain_epochs = int(cfg["epochs"] * ratio)
             bayes_epochs = cfg["epochs"] - pretrain_epochs
-            vanilla_ckpt = exp_root / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
-            if not vanilla_ckpt.exists() and prev_run is not None:
-                vanilla_ckpt = prev_run / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
-            if cfg.get("b_deeponet_reuse_vanilla", True) and vanilla_ckpt.exists():
-                print(f"  [Pretrain] 复用 {vanilla_ckpt.parent.parent.parent.name}/vanilla_deeponet epoch_{pretrain_epochs}...")
+            pretrain_ckpt = None
+            from_prev_run = False
+            # 1) 最近一次有 b_deeponet 预训练的 run
+            prev_b = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/_pretrain/final_model.pt")
+            if prev_b is not None:
+                pretrain_ckpt = prev_b / name / "_pretrain" / "final_model.pt"
+                from_prev_run = True
+            # 2) 本次 vanilla_deeponet 的 checkpoint（vanilla 需先跑）
+            if pretrain_ckpt is None:
+                vanilla_path = exp_root / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
+                if vanilla_path.exists():
+                    pretrain_ckpt = vanilla_path
+            # 3) 最近一次有 vanilla_deeponet 的 run（本次未训练 vanilla 时可用）
+            if pretrain_ckpt is None:
+                prev_v = _get_latest_run_with_file(
+                    exp_dir, exp_root, f"vanilla_deeponet/checkpoints/epoch_{pretrain_epochs}.pt"
+                )
+                if prev_v is not None:
+                    pretrain_ckpt = prev_v / "vanilla_deeponet" / "checkpoints" / f"epoch_{pretrain_epochs}.pt"
+                    from_prev_run = True
+            if pretrain_ckpt is not None:
+                src = "上次" if from_prev_run else "本次"
+                print(f"  [Pretrain] 复用{src} run 的 vanilla 预训练 (epoch_{pretrain_epochs})...")
                 vanilla_branch = FNNBranch(cfg["num_sensors"], cfg["branch_hidden"], cfg["output_dim"])
                 vanilla_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
                 pretrain_model = DeepONet(vanilla_branch, vanilla_trunk, cfg["output_dim"], bias=True)
-                ckpt = torch.load(vanilla_ckpt, map_location=device, weights_only=False)
-                pretrain_model.load_state_dict(ckpt["model_state_dict"], strict=True)
+                ckpt = torch.load(pretrain_ckpt, map_location=device, weights_only=False)
+                sd = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+                pretrain_model.load_state_dict(sd, strict=True)
+                pretrain_hist = []
+                if from_prev_run and prev_b is not None:
+                    prev_hist = prev_b / name / "_pretrain" / "training_history.json"
+                    prev_tb = prev_b / name / "_pretrain"
+                    if prev_hist.exists():
+                        with open(prev_hist, encoding="utf-8") as f:
+                            pretrain_hist = [h for h in json.load(f) if h.get("epoch", 0) <= pretrain_epochs]
+                    elif prev_tb.exists():
+                        pretrain_hist = _load_pretrain_hist_from_tb(prev_tb, pretrain_epochs)
+                else:
+                    vanilla_hist = exp_root / "vanilla_deeponet" / "training_history.json"
+                    if vanilla_hist.exists():
+                        with open(vanilla_hist, encoding="utf-8") as f:
+                            pretrain_hist = [h for h in json.load(f) if h.get("epoch", 0) <= pretrain_epochs]
             else:
                 print(f"  [Pretrain] vanilla 预训练 {pretrain_epochs} epochs，贝叶斯微调 {bayes_epochs} epochs（总 {cfg['epochs']}）...")
                 vanilla_branch = FNNBranch(cfg["num_sensors"], cfg["branch_hidden"], cfg["output_dim"])
@@ -213,7 +366,7 @@ def main():
                 pretrain_model = DeepONet(vanilla_branch, vanilla_trunk, cfg["output_dim"], bias=True)
                 pretrain_log = exp_root / name / "_pretrain"
                 pretrain_log.mkdir(parents=True, exist_ok=True)
-                train_antiderivative(
+                _, pretrain_metrics = train_antiderivative(
                     pretrain_model,
                     data,
                     lr=cfg["lr"],
@@ -231,17 +384,27 @@ def main():
                     checkpoint_every=0,
                     eval_every=cfg["eval_every_det"],
                 )
+                torch.save(pretrain_model.state_dict(), pretrain_log / "final_model.pt")
+                pretrain_hist = pretrain_metrics.get("history", [])
+                if pretrain_hist:
+                    with open(pretrain_log / "training_history.json", "w", encoding="utf-8") as f:
+                        json.dump(pretrain_hist, f, indent=2)
             print("  [Pretrain] 完成，初始化 b_deeponet...")
-        # pi_bt_deeponet: 用 transformer+PI 预训练（带 PI 约束，与微调目标一致）
+        # pi_bt_deeponet: 用 transformer+PI 预训练（带 PI 约束），或复用上次 run 的预训练
         elif branch_type == "transformer" and use_bayes and cfg.get("pi_bt_deeponet_pretrain", False):
             ratio = cfg.get("pi_bt_deeponet_pretrain_ratio", 5 / 6)
             pretrain_epochs = int(cfg["epochs"] * ratio)
             bayes_epochs = cfg["epochs"] - pretrain_epochs
-            pi_bt_pretrain_ckpt = exp_root / name / "_pretrain" / "pretrain_final.pt"
-            if not pi_bt_pretrain_ckpt.exists() and prev_run is not None:
-                pi_bt_pretrain_ckpt = prev_run / name / "_pretrain" / "pretrain_final.pt"
-            if pi_bt_pretrain_ckpt.exists():
-                print(f"  [Pretrain] 复用 {pi_bt_pretrain_ckpt.parent.parent.parent.name}/{name}/_pretrain...")
+            pretrain_ckpt = exp_root / name / "_pretrain" / "final_model.pt"
+            from_prev_run = False
+            if not pretrain_ckpt.exists():
+                prev_run = _get_latest_run_with_file(exp_dir, exp_root, f"{name}/_pretrain/final_model.pt")
+                if prev_run is not None:
+                    pretrain_ckpt = prev_run / name / "_pretrain" / "final_model.pt"
+                    from_prev_run = True
+            if pretrain_ckpt.exists():
+                src = "上次" if from_prev_run else "本次"
+                print(f"  [Pretrain] 复用{src} run 的 transformer+PI 预训练...")
                 trans_branch = TransformerBranch(
                     cfg["num_sensors"],
                     cfg["output_dim"],
@@ -252,8 +415,17 @@ def main():
                 )
                 trans_trunk = FNNTrunk(cfg["coord_dim"], cfg["trunk_hidden"], cfg["output_dim"])
                 pretrain_model = DeepONet(trans_branch, trans_trunk, cfg["output_dim"], bias=True)
-                ckpt = torch.load(pi_bt_pretrain_ckpt, map_location=device, weights_only=False)
-                pretrain_model.load_state_dict(ckpt["model_state_dict"], strict=True)
+                ckpt = torch.load(pretrain_ckpt, map_location=device, weights_only=False)
+                pretrain_model.load_state_dict(ckpt if isinstance(ckpt, dict) and "model_state_dict" not in ckpt else ckpt.get("model_state_dict", ckpt), strict=True)
+                pretrain_hist = []
+                if from_prev_run and prev_run is not None:
+                    prev_hist = prev_run / name / "_pretrain" / "training_history.json"
+                    prev_tb = prev_run / name / "_pretrain"
+                    if prev_hist.exists():
+                        with open(prev_hist, encoding="utf-8") as f:
+                            pretrain_hist = [h for h in json.load(f) if h.get("epoch", 0) <= pretrain_epochs]
+                    elif prev_tb.exists():
+                        pretrain_hist = _load_pretrain_hist_from_tb(prev_tb, pretrain_epochs)
             else:
                 print(f"  [Pretrain] transformer+PI 预训练 {pretrain_epochs} epochs，贝叶斯微调 {bayes_epochs} epochs（总 {cfg['epochs']}）...")
                 trans_branch = TransformerBranch(
@@ -268,7 +440,7 @@ def main():
                 pretrain_model = DeepONet(trans_branch, trans_trunk, cfg["output_dim"], bias=True)
                 pretrain_log = exp_root / name / "_pretrain"
                 pretrain_log.mkdir(parents=True, exist_ok=True)
-                train_antiderivative(
+                _, pretrain_metrics = train_antiderivative(
                     pretrain_model,
                     data,
                     lr=cfg["lr"],
@@ -286,7 +458,11 @@ def main():
                     checkpoint_every=0,
                     eval_every=cfg["eval_every_det"],
                 )
-                torch.save({"model_state_dict": pretrain_model.state_dict()}, pretrain_log / "pretrain_final.pt")
+                torch.save(pretrain_model.state_dict(), pretrain_log / "final_model.pt")  # 供下次 run 复用
+                pretrain_hist = pretrain_metrics.get("history", [])
+                if pretrain_hist:
+                    with open(pretrain_log / "training_history.json", "w", encoding="utf-8") as f:
+                        json.dump(pretrain_hist, f, indent=2)
             print("  [Pretrain] 完成，初始化 pi_bt_deeponet...")
 
         if branch_type == "fnn":
@@ -376,10 +552,15 @@ def main():
             checkpoint_every=5,
             checkpoint_dir=str(log_dir / "checkpoints"),
             eval_every=eval_every,
+            resume_from=str(resume_from) if resume_from is not None else None,
         )
         elapsed = time.perf_counter() - t0
 
         hist = metrics.get("history", [])
+        if use_bayes and pretrain_hist and pretrain_epochs > 0:
+            hist = pretrain_hist + [{**h, "epoch": h["epoch"] + pretrain_epochs} for h in hist]
+        elif resume_prev_hist:
+            hist = resume_prev_hist + hist
         hist_path = log_dir / "training_history.json"
         if hist:
             with open(hist_path, "w", encoding="utf-8") as f:
