@@ -18,6 +18,52 @@ import torch
 # =============================================================================
 # 配置参数（直接修改此处）
 # =============================================================================
+# 参数说明：
+# ---------- 数据 ----------
+#   n_train: 训练样本数。每个样本 = 一个不同的输入函数 u(x)，即算子实例数。
+#   n_test: 测试样本数。
+#   n_sensors: 传感器数量。u(x) 在 [0,1] 上均匀采样的点数，branch 输入维度。
+#   n_points_per_sample: 每个样本的 query 点数。训练时随机均匀采样并排序，测试时固定 100 点。
+#   length_scale: GRF 采样 u 时的核长度尺度，控制 u 的平滑度。越小 u 越抖。
+#   seed: 随机种子。
+# ---------- 噪声 ----------
+#   noise_std: 噪声强度。noise_relative=True 时表示 std(s) 的倍数；False 时绝对。
+#   只加在 s_train，s_test 保持干净用于评估。
+# ---------- 模型（FNN） ----------
+#   output_dim: DeepONet 输出秩，G(u)(y)=Σ b_i(u)·t_i(y)。越大表达能力越强，参数量越多。
+#   branch_hidden: branch 网络隐藏层维度列表，如 [20,20] 表示两层各 20 维。
+#   trunk_hidden: trunk 网络隐藏层维度列表。
+#   num_sensors: 必须与 n_sensors 一致，branch 输入维度。
+#   coord_dim: 坐标维度。Antiderivative 为 1（只有 x）。
+# ---------- 模型（Transformer） ----------
+#   transformer_d_model: Transformer 隐藏维度。
+#   transformer_nhead: 注意力头数。
+#   transformer_num_layers: Transformer 层数。
+#   transformer_dropout: Dropout 比例。
+#   prior_sigma: 贝叶斯层权重的先验 N(0, σ²) 的 σ。
+# ---------- 训练 ----------
+#   epochs: 总训练轮数。
+#   batch_size: 每批样本数。总样本 = n_train * n_points_per_sample。
+#   lr: 学习率。
+#   pi_weight: PDE 残差项权重。0=纯数据拟合；>0 时加入物理约束。
+#   bc_weight: 边界条件损失权重。
+#   ic_weight: 初值条件损失权重。Antiderivative 有 s(0)=0 的 anchor。
+#   n_collocation: PI 约束的配点数，每 batch 随机采样。
+# ---------- 贝叶斯 ----------
+#   alpha: α-divergence 的 α，1 对应 KL。
+#   mc_samples: 每步蒙特卡洛采样数。
+#   b_deeponet_pretrain: b_deeponet 是否先用 vanilla 预训练再贝叶斯微调。
+#   b_deeponet_pretrain_ratio: 预训练占比，如 2/3 表示 40 预训练 + 20 贝叶斯。
+#   pi_bt_deeponet_pretrain: pi_bt_deeponet 是否先用 transformer+PI 预训练。
+#   pi_bt_deeponet_pretrain_ratio: 同上。
+#   prior_sigma_pretrained: 预训练后先验 σ，小则 KL 更强、更保留预训练解。
+#   eval_mc_samples: 评估时 MC 采样数。
+#   eval_every_bayes: 贝叶斯模型每 N epoch 评估一次。
+#   eval_every_det: 确定性模型每 N epoch 评估一次。
+# ---------- 输出 ----------
+#   experiment_dir: 实验输出目录。
+#   reuse_prev_run: 是否复用上次 run 的结果。改 n_sensors/output_dim 等后必须 False。
+# =============================================================================
 CONFIG = {
     # 数据
     "n_train": 300,
@@ -26,15 +72,16 @@ CONFIG = {
     "n_points_per_sample": 10,
     "length_scale": 0.5,
     "seed": 42,
-    # 噪声（探究版）
+    # 噪声
     "noise_std": 0.02,
+    "noise_relative": True,
     # 模型
     "output_dim": 20,
     "branch_hidden": [20, 20],
     "trunk_hidden": [20, 20],
     "num_sensors": 50,
     "coord_dim": 1,
-    # Transformer 缩减：d_model 32→16，参数量约减半
+    # Transformer
     "transformer_d_model": 16,
     "transformer_nhead": 4,
     "transformer_num_layers": 2,
@@ -51,17 +98,16 @@ CONFIG = {
     # 贝叶斯
     "alpha": 1.0,
     "mc_samples": 3,
-    "b_deeponet_pretrain": True,  # b_deeponet 是否先用 vanilla 预训练再贝叶斯微调
-    "b_deeponet_pretrain_ratio": 2 / 3,  # 预训练占比；2/3 → 40 预训练 + 20 贝叶斯
-    "pi_bt_deeponet_pretrain": True,  # pi_bt_deeponet 是否先用 transformer 预训练
-    "pi_bt_deeponet_pretrain_ratio": 5 / 6,  # 5/6 → 25 预训练 + 5 贝叶斯
-    "prior_sigma_pretrained": 0.1,  # 预训练后先验 N(μ_pretrained, σ)，σ 小则 KL 更强保留预训练解
+    "b_deeponet_pretrain": True,
+    "b_deeponet_pretrain_ratio": 2 / 3,
+    "pi_bt_deeponet_pretrain": True,
+    "pi_bt_deeponet_pretrain_ratio": 5 / 6,
+    "prior_sigma_pretrained": 0.1,
     "eval_mc_samples": 20,
     "eval_every_bayes": 10,
     "eval_every_det": 5,
     # 输出
     "experiment_dir": "experiments/paper/exp1_baseline_comparison",
-    # 复用开关：改 n_sensors/output_dim 等系数后必须设为 False
     "reuse_prev_run": False,
 }
 
@@ -180,13 +226,26 @@ def _try_copy_deterministic_from_prev_run(
     return False, None
 
 
-def _add_noise(data: dict, noise_std: float, seed: int | None) -> None:
-    """In-place add N(0, noise_std²) to s_train and s_test."""
+def _add_noise(
+    data: dict,
+    noise_std: float,
+    seed: int | None,
+    train_only: bool = True,
+    relative: bool = False,
+) -> None:
+    """对目标添加 N(0, σ²) 噪声。
+    train_only=True：只加在 s_train，s_test 保持干净用于评估（推荐）。
+    relative=True：σ = noise_std * std(s_train)。
+    relative=False：σ = noise_std，绝对噪声。
+    """
     if noise_std <= 0:
         return
     rng = np.random.default_rng(seed)
-    data["s_train"] = (data["s_train"].astype(np.float64) + rng.normal(0, noise_std, data["s_train"].shape)).astype(np.float32)
-    data["s_test"] = (data["s_test"].astype(np.float64) + rng.normal(0, noise_std, data["s_test"].shape)).astype(np.float32)
+    s = data["s_train"].astype(np.float64)
+    sigma = (noise_std * np.std(s)) if relative else noise_std
+    data["s_train"] = (s + rng.normal(0, sigma, s.shape)).astype(np.float32)
+    if not train_only:
+        data["s_test"] = (data["s_test"].astype(np.float64) + rng.normal(0, sigma, data["s_test"].shape)).astype(np.float32)
 
 
 def _plot_model_curves(hist: list[dict], out_path: Path, model_name: str) -> None:
@@ -272,7 +331,7 @@ def main():
         length_scale=cfg["length_scale"],
         seed=cfg["seed"],
     )
-    _add_noise(data, cfg.get("noise_std", 0), cfg["seed"] + 1)
+    _add_noise(data, cfg.get("noise_std", 0), cfg["seed"] + 1, relative=cfg.get("noise_relative", True))
 
     exp_root = Path(cfg["experiment_dir"]) / f"run_{ts}"
     exp_root.mkdir(parents=True, exist_ok=True)

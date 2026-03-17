@@ -19,20 +19,64 @@ import torch
 # =============================================================================
 # 配置参数（直接修改此处）
 # =============================================================================
+# 参数说明：
+# ---------- 数据 ----------
+#   n_train: 训练样本数。每个样本 = 一个不同的右端项 f(x,y)，即算子实例数。
+#   n_test: 测试样本数。
+#   nx, ny: 源项 f 的传感器网格分辨率。num_sensors = nx*ny，branch 输入维度。
+#   n_points_per_sample: 每个样本的 query 点数。uniform 时取 sqrt 取整（如 64→8×8）。
+#   max_mode: Fourier 最大模数。f=Σ a_mn sin(mπx)sin(nπy)，m,n∈[1,max_mode]，总模数=max_mode²。
+#             越大问题越难（高频多），越小越简单。建议 2~8。
+#   length_scale: Fourier 系数 GRF 采样的长度尺度。
+#   seed: 随机种子。
+#   query_sampling: "uniform"=规则网格；"random"=在 [0,1]² 随机采样。
+# ---------- 噪声 ----------
+#   noise_std: 噪声强度。0=无噪声。
+#   noise_relative: True 时 σ=noise_std*std(s)，如 0.02 表示 2% 信噪比；False 时 σ=noise_std 绝对。
+#   只加在 s_train，s_test 保持干净用于评估。
+# ---------- 模型（FNN） ----------
+#   output_dim: DeepONet 输出秩。需与 max_mode² 匹配，越大表达能力越强。
+#   branch_hidden: branch 隐藏层维度。
+#   trunk_hidden: trunk 隐藏层维度。
+#   coord_dim: 坐标维度，2D Poisson 为 2 (x,y)。
+# ---------- 模型（Transformer） ----------
+#   transformer_d_model, nhead, num_layers, dropout: Transformer 结构参数。
+#   prior_sigma: 贝叶斯先验 σ。
+# ---------- 训练 ----------
+#   epochs, batch_size, lr: 常规训练参数。
+#   pi_weight: PDE 残差 -∇²p-f=0 的权重。
+#   bc_weight: 边界条件 p=0 的权重。
+#   ic_weight: Poisson 无初值，保持 0。
+#   n_collocation: PI 配点数。
+# ---------- 贝叶斯 ----------
+#   alpha: α-divergence 的 α，1 对应 KL。
+#   mc_samples: 每步蒙特卡洛采样数。
+#   b_deeponet_pretrain: b_deeponet 是否先用 vanilla 预训练再贝叶斯微调。
+#   b_deeponet_pretrain_ratio: 预训练占比。
+#   pi_bt_deeponet_pretrain: pi_bt_deeponet 是否先用 transformer+PI 预训练。
+#   pi_bt_deeponet_pretrain_ratio: 同上。
+#   prior_sigma_pretrained: 预训练后先验 σ。
+#   eval_mc_samples: 评估时 MC 采样数。
+#   eval_every_bayes / eval_every_det: 评估频率。
+# ---------- 输出 ----------
+#   experiment_dir: 实验输出目录。
+#   reuse_prev_run: 改 max_mode/output_dim/nx/ny 等后必须 False。
+# =============================================================================
 CONFIG = {
-    # 数据（rel_l2≈1 时多为 nx*ny 过大或 n_points 过少，建议先恢复此配置）
+    # 数据
     "n_train": 800,
     "n_test": 200,
     "nx": 10,
     "ny": 10,
-    "n_points_per_sample": 25,  # uniform 时用 sqrt 取整，64→8×8 网格
+    "n_points_per_sample": 25,
     "max_mode": 2,
     "length_scale": 2.0,
     "seed": 42,
-    "query_sampling": "uniform",  # "uniform" 或 "random"
-    # 噪声（探究版）
-    "noise_std": 0.1,
-    # 模型（num_sensors = nx*ny）
+    "query_sampling": "uniform",
+    # 噪声（只加在训练集）
+    "noise_std": 0.02,
+    "noise_relative": True,  # True=相对噪声(推荐)，False=绝对噪声
+    # 模型
     "output_dim": 20,
     "branch_hidden": [64, 64],
     "trunk_hidden": [64, 64],
@@ -49,7 +93,7 @@ CONFIG = {
     "lr": 0.001,
     "pi_weight": 0.1,
     "bc_weight": 1.0,
-    "ic_weight": 0.0,  # Poisson 无 IC
+    "ic_weight": 0.0,
     "n_collocation": 64,
     # 贝叶斯
     "alpha": 1.0,
@@ -161,12 +205,26 @@ def _try_copy_deterministic_from_prev_run(
     return False, None
 
 
-def _add_noise(data: dict, noise_std: float, seed: int | None) -> None:
+def _add_noise(
+    data: dict,
+    noise_std: float,
+    seed: int | None,
+    train_only: bool = True,
+    relative: bool = False,
+) -> None:
+    """对目标添加 N(0, σ²) 噪声。
+    train_only=True：只加在 s_train，s_test 保持干净用于评估（推荐）。
+    relative=True：σ = noise_std * std(s_train)，即噪声为信号标准差的倍数。
+    relative=False：σ = noise_std，绝对噪声。2D Poisson 的 p 通常较小，0.02 可能过大。
+    """
     if noise_std <= 0:
         return
     rng = np.random.default_rng(seed)
-    data["s_train"] = (data["s_train"].astype(np.float64) + rng.normal(0, noise_std, data["s_train"].shape)).astype(np.float32)
-    data["s_test"] = (data["s_test"].astype(np.float64) + rng.normal(0, noise_std, data["s_test"].shape)).astype(np.float32)
+    s = data["s_train"].astype(np.float64)
+    sigma = (noise_std * np.std(s)) if relative else noise_std
+    data["s_train"] = (s + rng.normal(0, sigma, s.shape)).astype(np.float32)
+    if not train_only:
+        data["s_test"] = (data["s_test"].astype(np.float64) + rng.normal(0, sigma, data["s_test"].shape)).astype(np.float32)
 
 
 def _plot_model_curves(hist: list[dict], out_path: Path, model_name: str) -> None:
@@ -249,7 +307,7 @@ def main():
         seed=cfg["seed"],
         query_sampling=cfg["query_sampling"],
     )
-    _add_noise(data, cfg.get("noise_std", 0), cfg["seed"] + 1)
+    _add_noise(data, cfg.get("noise_std", 0), cfg["seed"] + 1, relative=cfg.get("noise_relative", True))
 
     exp_root = Path(cfg["experiment_dir"]) / f"run_{ts}"
     exp_root.mkdir(parents=True, exist_ok=True)
