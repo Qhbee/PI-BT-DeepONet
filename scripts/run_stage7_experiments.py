@@ -1,6 +1,6 @@
 """Stage 7: PI extension experiments - 3 PI modes + Transformer + Bayesian.
 
-Validates: standard_pi, hard_bc_pi, s_pinn with branch=transformer, bayes_method=alpha_vi.
+Validates: standard_pi, hard_bc_pi, stabilized_pi with branch=transformer, bayes_method=alpha_vi.
 main.py already supports PI extension; this script demonstrates compatibility.
 """
 
@@ -25,13 +25,13 @@ DEFAULT_OUT_DIR = str(_REPO_ROOT / "experiments" / "stage7")
 DEFAULT_STAGE7_CONFIGS = [
     ("diffusion_reaction_standard_pi.yaml", "standard_pi"),
     ("diffusion_reaction_hard_bc.yaml", "hard_bc_pi"),
-    ("diffusion_reaction_s_pinn.yaml", "s_pinn"),
+    ("diffusion_reaction_stabilized_pi.yaml", "stabilized_pi"),
 ]
 DEFAULT_FAST = False
 DEFAULT_FASTER = True
 DEFAULT_CHECKPOINT_EVERY = 5
 DEFAULT_RESUME: str | None = None
-DEFAULT_SEED: int | None = None
+DEFAULT_SEED: int | None = 999
 # 未设置 STAGE7_ULTRA 时是否启用极小算例（原默认等价于开启）
 DEFAULT_ULTRA = False
 

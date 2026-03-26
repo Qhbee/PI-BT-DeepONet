@@ -166,7 +166,7 @@ def main():
         fig, ax = plt.subplots(figsize=(5, 4))
         ax.bar(modes, rel_l2s, color=["#2ecc71", "#e74c3c", "#3498db"], alpha=0.8)
         ax.set_ylabel("RelL2")
-        ax.set_title("Stage 7: PI extension (standard_pi / hard_bc_pi / s_pinn)")
+        ax.set_title("Stage 7: PI extension (standard_pi / hard_bc_pi / stabilized_pi)")
         ax.grid(True, alpha=0.3, axis="y")
         fig.tight_layout()
         for suf in ["", f"_{TS}"]:
@@ -178,7 +178,7 @@ def main():
     stage7_dirs = [
         (ROOT / "experiments" / "stage7" / "standard_pi_transformer_bayes", "standard_pi"),
         (ROOT / "experiments" / "stage7" / "hard_bc_pi_transformer_bayes", "hard_bc_pi"),
-        (ROOT / "experiments" / "stage7" / "s_pinn_transformer_bayes", "s_pinn"),
+        (ROOT / "experiments" / "stage7" / "stabilized_pi_transformer_bayes", "stabilized_pi"),
     ]
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     for d, label in stage7_dirs:

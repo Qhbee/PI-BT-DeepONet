@@ -331,7 +331,7 @@ def _ns_beltrami_residual(
     return loss
 
 
-def _diffusion_reaction_residual_s_pinn(
+def _diffusion_reaction_residual_stabilized_pi(
     model: torch.nn.Module,
     u: torch.Tensor,
     x_sensors: torch.Tensor,
@@ -344,7 +344,7 @@ def _diffusion_reaction_residual_s_pinn(
     n_subdomains: int = 16,
 ) -> torch.Tensor:
     """
-    S-PINN style: partition domain into subdomains, compute mean residual per subdomain.
+    Stabilized PI: partition domain into subdomains, mean residual per subdomain.
     For 2D (t,x), use a grid of subdomains.
     """
     batch = u.shape[0]
@@ -402,7 +402,7 @@ def compute_residual(
         x_sensors: (num_sensors,) or (coord_dim, num_sensors) sensor positions
         pde_type: "none" | "antiderivative" | "burgers" | "diffusion_reaction" | "darcy"
         sample: for Bayesian models, whether to sample weights
-        physics_mode: "standard_pi" | "hard_bc_pi" | "s_pinn"
+        physics_mode: "standard_pi" | "hard_bc_pi" | "stabilized_pi"
 
     Returns:
         scalar residual loss
@@ -410,14 +410,14 @@ def compute_residual(
     if pde_type == "none":
         return torch.tensor(0.0, device=u.device, dtype=u.dtype)
 
-    if physics_mode == "s_pinn" and pde_type == "diffusion_reaction" and x_sensors is not None:
+    if physics_mode == "stabilized_pi" and pde_type == "diffusion_reaction" and x_sensors is not None:
         if domain_min is None or domain_max is None:
             domain_min = torch.tensor([0.0, 0.0], device=u.device, dtype=u.dtype)
             domain_max = torch.tensor([1.0, 1.0], device=u.device, dtype=u.dtype)
         n_colloc = y.shape[1] if y.dim() == 3 else 64
         if x_sensors.dim() > 1:
             x_sensors = x_sensors[0]
-        return _diffusion_reaction_residual_s_pinn(
+        return _diffusion_reaction_residual_stabilized_pi(
             model, u, x_sensors, diffusion_D, reaction_k, sample,
             domain_min, domain_max, n_colloc, n_subdomains=16,
         )

@@ -1,4 +1,4 @@
-# Stage 7: diffusion_reaction with S-PINN subdomain residual
+# Stage 7: diffusion_reaction with stabilized PI (subdomain-averaged residual)
 case: diffusion_reaction
 
 model:
@@ -12,7 +12,7 @@ model:
   coord_dim: 2
 
 physics:
-  physics_mode: s_pinn
+  physics_mode: stabilized_pi
   pi_constraint: diffusion_reaction
   pi_weight: 0.1
   bc_weight: 1.0

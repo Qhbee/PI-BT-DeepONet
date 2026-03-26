@@ -13,7 +13,7 @@ def main():
     modes = [
         "standard_pi_transformer_bayes",
         "hard_bc_pi_transformer_bayes",
-        "s_pinn_transformer_bayes",
+        "stabilized_pi_transformer_bayes",
     ]
     results = []
     for mode in modes:
