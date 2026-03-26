@@ -11,7 +11,23 @@ from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+# 直接运行脚本时的默认；命令行 / 环境变量仍可覆盖。
+DEFAULT_EPOCHS: int | None = None  # None 表示使用 config 里的 training.epochs
+DEFAULT_CONFIG_DIR = str(_REPO_ROOT / "configs")
+DEFAULT_BASE_CONFIG = "diffusion_reaction_standard_pi.yaml"
+DEFAULT_OUT_DIR = str(_REPO_ROOT / "experiments" / "stage8")
+DEFAULT_POD_REL = Path("artifacts") / "pod" / "diffusion_reaction_pod.npz"
+DEFAULT_FAST = False
+DEFAULT_FASTER = False
+DEFAULT_SEED: int | None = None
+DEFAULT_CHECKPOINT_EVERY = 5
+DEFAULT_RESUME: str | None = None
+DEFAULT_TRUNK_TYPES = ["fnn", "pod", "ex", "ex_v2"]
+# 未设置 STAGE8_ULTRA 时是否启用极小算例（原默认等价于开启）
+DEFAULT_ULTRA = True
 
 from src.data.generators import generate_diffusion_reaction_data
 from src.physics.hard_bc import HardBCWrapper
@@ -19,17 +35,34 @@ from src.training.trainer import train_operator
 
 from main import _build_model
 
-ULTRA = os.environ.get("STAGE8_ULTRA", "1").lower() in ("1", "true", "yes")
+ULTRA = os.environ.get("STAGE8_ULTRA", "1" if DEFAULT_ULTRA else "0").lower() in ("1", "true", "yes")
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=None, help="Override epochs (default: from config)")
-    p.add_argument("--fast", action="store_true", help="减小 nx/nt（nx=30,nt=31）")
-    p.add_argument("--faster", action="store_true", help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训")
-    p.add_argument("--seed", type=int, default=None, help="Override seed for reproducibility (default: from data_cfg)")
-    p.add_argument("--checkpoint-every", type=int, default=5, help="Save checkpoint every N epochs (0=disable)")
-    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume (e.g. experiments/stage8/trunk_fnn_transformer_bayes/checkpoints/latest.pt)")
+    p.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Override epochs (default: from config)")
+    p.add_argument(
+        "--fast",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FAST,
+        help="减小 nx/nt（nx=30,nt=31）",
+    )
+    p.add_argument(
+        "--faster",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FASTER,
+        help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训",
+    )
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Override seed for reproducibility (default: from data_cfg)")
+    p.add_argument(
+        "--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY, help="Save checkpoint every N epochs (0=disable)"
+    )
+    p.add_argument(
+        "--resume",
+        type=str,
+        default=DEFAULT_RESUME,
+        help="Path to checkpoint to resume (e.g. experiments/stage8/trunk_fnn_transformer_bayes/checkpoints/latest.pt)",
+    )
     return p.parse_args()
 
 
@@ -39,10 +72,10 @@ def count_params(model) -> int:
 
 def main():
     args = parse_args()
-    out_dir = Path("experiments/stage8")
+    out_dir = Path(DEFAULT_OUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    config_path = Path("configs/diffusion_reaction_standard_pi.yaml")
+    config_path = Path(DEFAULT_CONFIG_DIR) / DEFAULT_BASE_CONFIG
     if not config_path.exists():
         print(f"[SKIP] {config_path} not found")
         return
@@ -92,24 +125,24 @@ def main():
     data = generate_diffusion_reaction_data(**data_cfg)
 
     # Build POD basis for trunk_type=pod
-    pod_path = Path("artifacts/pod/diffusion_reaction_pod.npz")
+    pod_path = _REPO_ROOT / DEFAULT_POD_REL
     if not pod_path.exists():
         print("Building POD basis...")
         import subprocess
         subprocess.run(
             [
                 sys.executable,
-                "scripts/build_diffusion_reaction_pod_basis.py",
+                str(_REPO_ROOT / "scripts" / "build_diffusion_reaction_pod_basis.py"),
                 "--rank", "16",
                 "--n_train", str(data_cfg.get("n_train", 30)),
                 "--nx", str(data_cfg.get("nx", 12)),
                 "--nt", str(data_cfg.get("nt", 11)),
             ],
-            cwd=Path(__file__).resolve().parent.parent,
+            cwd=_REPO_ROOT,
             check=True,
         )
 
-    trunk_types = ["fnn", "pod", "ex", "ex_v2"]
+    trunk_types = list(DEFAULT_TRUNK_TYPES)
     results = []
 
     for trunk_type in trunk_types:

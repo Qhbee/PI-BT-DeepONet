@@ -15,7 +15,25 @@ from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+# 直接运行脚本时的默认；命令行 / 环境变量仍可覆盖。
+DEFAULT_EPOCHS: int | None = None  # None 表示使用各 config 里的 training.epochs
+DEFAULT_CONFIG_DIR = str(_REPO_ROOT / "configs")
+DEFAULT_OUT_DIR = str(_REPO_ROOT / "experiments" / "stage7")
+DEFAULT_STAGE7_CONFIGS = [
+    ("diffusion_reaction_standard_pi.yaml", "standard_pi"),
+    ("diffusion_reaction_hard_bc.yaml", "hard_bc_pi"),
+    ("diffusion_reaction_s_pinn.yaml", "s_pinn"),
+]
+DEFAULT_FAST = False
+DEFAULT_FASTER = True
+DEFAULT_CHECKPOINT_EVERY = 5
+DEFAULT_RESUME: str | None = None
+DEFAULT_SEED: int | None = None
+# 未设置 STAGE7_ULTRA 时是否启用极小算例（原默认等价于开启）
+DEFAULT_ULTRA = False
 
 from src.data.generators import generate_diffusion_reaction_data
 from src.physics.hard_bc import HardBCWrapper
@@ -23,8 +41,8 @@ from src.training.trainer import train_operator
 
 from main import _build_model
 
-# ULTRA: 极小算例，仅验证能跑通
-ULTRA = os.environ.get("STAGE7_ULTRA", "1").lower() in ("1", "true", "yes")
+# ULTRA: 极小算例，仅验证能跑通（环境变量 STAGE7_ULTRA 优先）
+ULTRA = os.environ.get("STAGE7_ULTRA", "1" if DEFAULT_ULTRA else "0").lower() in ("1", "true", "yes")
 
 
 def count_params(model) -> int:
@@ -33,22 +51,31 @@ def count_params(model) -> int:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=None, help="Override epochs (default: from config)")
-    p.add_argument("--fast", action="store_true", help="减小 nx/nt 加速（nx=30,nt=31）")
-    p.add_argument("--faster", action="store_true", help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训")
-    p.add_argument("--checkpoint-every", type=int, default=5, help="Save checkpoint every N epochs (0=disable)")
-    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
-    p.add_argument("--seed", type=int, default=None, help="Override seed (default: from data_cfg)")
+    p.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Override epochs (default: from config)")
+    p.add_argument(
+        "--fast",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FAST,
+        help="减小 nx/nt 加速（nx=30,nt=31）",
+    )
+    p.add_argument(
+        "--faster",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FASTER,
+        help="更小 nx/nt（nx=15,nt=16），约 30min/5epoch，可 resume 续训",
+    )
+    p.add_argument(
+        "--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY, help="Save checkpoint every N epochs (0=disable)"
+    )
+    p.add_argument("--resume", type=str, default=DEFAULT_RESUME, help="Path to checkpoint to resume")
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Override seed (default: from data_cfg)")
     args = p.parse_args()
 
-    out_dir = Path("experiments/stage7")
+    out_dir = Path(DEFAULT_OUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    configs = [
-        ("configs/diffusion_reaction_standard_pi.yaml", "standard_pi"),
-        ("configs/diffusion_reaction_hard_bc.yaml", "hard_bc_pi"),
-        ("configs/diffusion_reaction_s_pinn.yaml", "s_pinn"),
-    ]
+    cfg_dir = Path(DEFAULT_CONFIG_DIR)
+    configs = [(str(cfg_dir / rel), mode_name) for rel, mode_name in DEFAULT_STAGE7_CONFIGS]
 
     branch_type = "transformer"
     bayes_method = "alpha_vi"

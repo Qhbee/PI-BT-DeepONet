@@ -12,7 +12,20 @@ from pathlib import Path
 import torch
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+# 直接 `python scripts/run_stage6_experiments.py` 时使用的默认；命令行仍可覆盖。
+DEFAULT_EPOCHS = 15
+DEFAULT_CONFIG_DIR = str(_REPO_ROOT / "configs")
+DEFAULT_OUT_DIR = str(_REPO_ROOT / "experiments" / "stage6")
+DEFAULT_ROUTE = "all"  # A | B | all
+DEFAULT_BRANCH = "both"  # hard | cls | both
+DEFAULT_FAST = True
+DEFAULT_ULTRA = False
+DEFAULT_CHECKPOINT_EVERY = 0
+DEFAULT_RESUME: str | None = None
+DEFAULT_SEED: int | None = None
 
 from src.data import get_generator
 from src.data.generators import (  # noqa: F401
@@ -89,16 +102,28 @@ def build_model(cfg: dict, coord_dim: int, n_outputs: int, input_channels: int, 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=15)
-    parser.add_argument("--config-dir", type=str, default="configs")
-    parser.add_argument("--out-dir", type=str, default="experiments/stage6")
-    parser.add_argument("--route", type=str, choices=["A", "B", "all"], default="all")
-    parser.add_argument("--branch", type=str, choices=["hard", "cls", "both"], default="both")
-    parser.add_argument("--fast", action="store_true", help="快速模式：减少 n_train/nx/ny/n_collocation，加速约 10x")
-    parser.add_argument("--ultra", action="store_true", help="极速模式：每实验约 30s，n_train=20, nx=ny=16, n_collocation=16")
-    parser.add_argument("--checkpoint-every", type=int, default=0, help="每 N epoch 保存 checkpoint，0=禁用")
-    parser.add_argument("--resume", type=str, default=None, help="续训 checkpoint 路径")
-    parser.add_argument("--seed", type=int, default=None, help="随机种子，覆盖 data_cfg")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--config-dir", type=str, default=DEFAULT_CONFIG_DIR)
+    parser.add_argument("--out-dir", type=str, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--route", type=str, choices=["A", "B", "all"], default=DEFAULT_ROUTE)
+    parser.add_argument("--branch", type=str, choices=["hard", "cls", "both"], default=DEFAULT_BRANCH)
+    parser.add_argument(
+        "--fast",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FAST,
+        help="快速模式：减少 n_train/nx/ny/n_collocation，加速约 10x",
+    )
+    parser.add_argument(
+        "--ultra",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ULTRA,
+        help="极速模式：每实验约 30s，n_train=20, nx=ny=16, n_collocation=16",
+    )
+    parser.add_argument(
+        "--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY, help="每 N epoch 保存 checkpoint，0=禁用"
+    )
+    parser.add_argument("--resume", type=str, default=DEFAULT_RESUME, help="续训 checkpoint 路径")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子，覆盖 data_cfg")
     args = parser.parse_args()
 
     if args.ultra:
