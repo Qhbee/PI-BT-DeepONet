@@ -89,7 +89,8 @@ pdfsubject={中国人民大学学位论文}}
 \setsansfont{ArialMT}
 \setmonofont{CourierNewPSMT}
 \xeCJKsetup{AutoFakeSlant={true}}
-\setCJKmainfont{SimSun}
+% SimSun 无独立 Bold 字重；不指定 BoldFont 时 \textbf 对汉字无效
+\setCJKmainfont{SimSun}[BoldFont=SimHei]
 \setCJKsansfont{SimHei}
 \setCJKmonofont{FangSong}
 \newcommand{\rowspace}{%
