@@ -45,9 +45,28 @@ DEFAULT_GRID_N = 80
 DEFAULT_DPI = 200
 DEFAULT_OUT_DIR = _project_root() / "thesis" / "figures"
 
+# 由 _configure_matplotlib_chinese_font 设置；仅用于含中文的 Text 的 fontproperties，全局仍用 DejaVu
+_PLOT_CJK_FONT_FAMILY: str | None = None
+
+# 第二行三个 3D 误差子图（error / abs error / square error）的 z 轴范围；不设命令行参数，在此改常量即可。
+# None = 随数据自动缩放；(zmin, zmax) = 固定显示范围（论文多图对比时常用固定比例）。
+SURFACE3D_ZLIM_ERROR = (-0.02, 0.02)  # 例: (-0.02, 0.02)
+SURFACE3D_ZLIM_ABS_ERROR = (0.0, 0.02)  # 例: (0.0, 0.02)
+SURFACE3D_ZLIM_SQ_ERROR = (0.0, 4.0e-4)  # 例: (0.0, 2.0e-4)
+
+
+def _apply_surface3d_zlim(ax, zlim: tuple[float, float] | None) -> None:
+    if zlim is not None:
+        lo, hi = zlim
+        ax.set_zlim(lo, hi)
+
 
 def _configure_matplotlib_chinese_font() -> None:
-    """优先使用系统中文字体（Windows 常见为 Microsoft YaHei / SimHei），避免 CJK 显示为方框。"""
+    """全局默认仅 DejaVu Sans（英文/数字/坐标轴）；中文字体名存入 _PLOT_CJK_FONT_FAMILY，供含中文的 Text 用 fontproperties 显式指定。
+
+    说明：若把「DejaVu+雅黑」同时放进 font.sans-serif，混合字符串会先对每个字符试 DejaVu，对每个汉字都会触发 missing-glyph 警告。
+    """
+    global _PLOT_CJK_FONT_FAMILY
     import matplotlib
     from matplotlib import font_manager
 
@@ -62,15 +81,24 @@ def _configure_matplotlib_chinese_font() -> None:
         "WenQuanYi",
         "Source Han",
     )
-    picked: list[str] = []
+    picked: str | None = None
     for f in font_manager.fontManager.ttflist:
         name = f.name
         if any(kw in name for kw in keywords):
-            picked.append(name)
+            picked = name
             break
-    if picked:
-        matplotlib.rcParams["font.sans-serif"] = picked + ["DejaVu Sans"]
+    _PLOT_CJK_FONT_FAMILY = picked
+    matplotlib.rcParams["font.sans-serif"] = ["DejaVu Sans"]
     matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+def _cjk_fontproperties():
+    """仅用于含中文的标题/说明框；英文子图标题仍走全局 DejaVu。"""
+    from matplotlib.font_manager import FontProperties
+
+    if _PLOT_CJK_FONT_FAMILY is None:
+        return None
+    return FontProperties(family=_PLOT_CJK_FONT_FAMILY)
 
 
 def _load_config(run_dir: Path) -> dict:
@@ -225,6 +253,17 @@ def _marginal_rel_l2(err: np.ndarray, p_true: np.ndarray) -> tuple[np.ndarray, n
     return x_coords, rel_x, y_coords, rel_y
 
 
+def _p_on_sensor_grid(coeffs: np.ndarray, *, nx: int, ny: int, max_mode: int) -> np.ndarray:
+    """与右端项 f 相同传感器网格上的解析真解 p（-∇²p=f，p|∂Ω=0）。"""
+    from src.data.generators.poisson_2d import fourier_to_solution
+
+    x_grid = np.linspace(0.0, 1.0, nx, dtype=np.float64)
+    y_grid = np.linspace(0.0, 1.0, ny, dtype=np.float64)
+    xx_sens, yy_sens = np.meshgrid(x_grid, y_grid, indexing="xy")
+    c = np.asarray(coeffs, dtype=np.float32).reshape(-1)
+    return np.asarray(fourier_to_solution(c, xx_sens, yy_sens, max_mode), dtype=np.float64).ravel()
+
+
 def _branch_u_panel_text_compact(
     u_flat: np.ndarray,
     coeffs: np.ndarray,
@@ -236,24 +275,21 @@ def _branch_u_panel_text_compact(
     picked_by_best: bool,
     query_rel_l2: float | None,
 ) -> str:
-    """第一行第三列信息框用（简短）；论文中完整数值见同目录 single_case_branch_u.txt。"""
-    u = np.asarray(u_flat, dtype=np.float64).ravel()
+    """第一行第三列信息框：仅 Fourier 系数 $a$ 与 $f,p$ 解析式；完整元数据见 single_case_branch_u.txt。"""
+    _ = (u_flat, idx, nx, ny, picked_by_best, query_rel_l2)
     c = np.asarray(coeffs, dtype=np.float64).ravel()
-    n = u.size
+    M = int(max_mode)
+    _mw = 52
+    # 中文用 CJK；$...$ 为 mathtext（DejaVu）
     lines = [
-        "Branch 输入 u",
-        f"f 在 {nx}×{ny} 网格采样，N={n}",
-        f"测试索引 k={idx}" + ("（best）" if picked_by_best else ""),
+        f"Fourier 系数 $a$：",
+        np.array2string(c, precision=4, max_line_width=_mw, separator=', '),
+        "\n",
+        r"右端项 $f$ 与真解 $p$：",
+        r"（$-\nabla^2 p=f$，齐次 Dirichlet 边界）",
+        rf"$f(x,y)=\sum_{{m,n=1}}^{{{M}}} a_{{mn}}\sin(m\pi x)\sin(n\pi y)$",
+        rf"$p(x,y)=\sum_{{m,n=1}}^{{{M}}}\frac{{a_{{mn}}}}{{\pi^2(m^2+n^2)}}\sin(m\pi x)\sin(n\pi y)$",
     ]
-    if query_rel_l2 is not None:
-        lines.append(f"rel_l2@query={query_rel_l2:.5f}")
-    lines.append(
-        f"u: min={u.min():.4g} max={u.max():.4g} ‖u‖₂={np.linalg.norm(u):.4g}"
-    )
-    lines.append("Fourier 系数 a:")
-    lines.append(np.array2string(c, precision=4, max_line_width=42))
-    lines.append("u 前 6 项:")
-    lines.append(np.array2string(u[:6], precision=4, max_line_width=42))
     return "\n".join(lines)
 
 
@@ -282,9 +318,13 @@ def _save_branch_u_file(
         f.write(f"# 测试集样本索引 k={idx}  seed={cfg_seed}  best_test={picked_by_best}\n")
         if query_rel_l2 is not None:
             f.write(f"# query 点 rel_l2={query_rel_l2:.18e}\n")
-        f.write(f"# Fourier 系数 a (维度 {c.size})，真解由 a 解析给出:\n")
+        f.write(f"# Fourier 系数 a (维度 {c.size})；解析真解 p 由 a 给出（fourier_to_solution）\n")
         f.write("# " + " ".join(f"{float(x):.18e}" for x in c) + "\n")
-        f.write("# --- u 分量 i, u_i ---\n")
+        p_sens = _p_on_sensor_grid(c, nx=nx, ny=ny, max_mode=max_mode)
+        f.write("# --- 解析真解 p 分量 i, p_i（与 f 同网格）---\n")
+        for i, v in enumerate(p_sens):
+            f.write(f"{i}\t{v:.18e}\n")
+        f.write("# --- 右端项 f / Branch 输入 u 分量 i, u_i ---\n")
         for i, v in enumerate(u):
             f.write(f"{i}\t{v:.18e}\n")
     print(f"[saved] {path}")
@@ -307,8 +347,16 @@ def run_plot(
     import matplotlib
 
     matplotlib.use("Agg")
+    # 与中文正文字体分离：数学下标等用 DejaVu，避免「中文字体缺 Glyph 8322 (SUBSCRIPT TWO)」警告
+    matplotlib.rcParams["mathtext.fontset"] = "dejavusans"
     if use_cjk_font:
         _configure_matplotlib_chinese_font()
+    else:
+        global _PLOT_CJK_FONT_FAMILY
+        _PLOT_CJK_FONT_FAMILY = None
+        matplotlib.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+    fp_cjk = _cjk_fontproperties() if use_cjk_font else None
     import matplotlib.pyplot as plt
 
     root = _project_root()
@@ -428,8 +476,11 @@ def run_plot(
     )
 
     # --- 3D: 2 rows — pred, true | error, abs, sq ---
+    # 3D + tight_layout 易把行距压扁，第二行标题会「顶」到第一行；用较大 hspace + 较小 pad 把标题压在各自子图上方。
     fig = plt.figure(figsize=(12, 8))
     teal = (0.15, 0.45, 0.55, 0.85)
+    _surf_title_fs = 11
+    _surf_title_pad = 5.0
 
     def surf(ax, Z, title, zlabel="p"):
         ax.plot_surface(
@@ -438,7 +489,7 @@ def run_plot(
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel(zlabel)
-        ax.set_title(title, fontsize=10)
+        ax.set_title(title, fontsize=_surf_title_fs, pad=_surf_title_pad)
 
     ax0 = fig.add_subplot(2, 3, 1, projection="3d")
     surf(ax0, p_pred, "pred")
@@ -446,23 +497,30 @@ def run_plot(
     surf(ax1, p_true, "true")
     ax_u = fig.add_subplot(2, 3, 3)
     ax_u.axis("off")
-    ax_u.text(
-        0.02,
-        0.98,
-        panel_txt,
-        transform=ax_u.transAxes,
-        va="top",
-        ha="left",
-        fontsize=7.5,
-    )
+    _txt_kw = {
+        "transform": ax_u.transAxes,
+        "va": "top",
+        "ha": "left",
+        "fontsize": 11,
+    }
+    if fp_cjk is not None:
+        _txt_kw["fontproperties"] = fp_cjk
+    ax_u.text(0.07, 0.98, panel_txt, **_txt_kw)
     ax2 = fig.add_subplot(2, 3, 4, projection="3d")
     surf(ax2, err, "error", zlabel="value")
+    _apply_surface3d_zlim(ax2, SURFACE3D_ZLIM_ERROR)
     ax3 = fig.add_subplot(2, 3, 5, projection="3d")
     surf(ax3, abs_err, "abs error", zlabel="value")
+    _apply_surface3d_zlim(ax3, SURFACE3D_ZLIM_ABS_ERROR)
     ax4 = fig.add_subplot(2, 3, 6, projection="3d")
     surf(ax4, sq_err, "square error", zlabel="value")
-    fig.suptitle(f"固定输入u后函数p(x,y)的预测、真值、误差可视化", fontsize=11)
-    plt.tight_layout()
+    _apply_surface3d_zlim(ax4, SURFACE3D_ZLIM_SQ_ERROR)
+    _supt_kw = {"fontsize": 11}
+    if fp_cjk is not None:
+        _supt_kw["fontproperties"] = fp_cjk
+    fig.suptitle(f"固定输入u后函数p(x,y)的预测、真值、误差可视化", **_supt_kw)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.subplots_adjust(hspace=0.48, wspace=0.12)
     p3d = out / "single_case_3d_surfaces.png"
     plt.savefig(p3d, dpi=dpi, bbox_inches="tight")
     plt.close()
@@ -482,7 +540,10 @@ def run_plot(
         ax.set_ylabel("y")
         ax.set_title(title)
         fig2.colorbar(tpc, ax=ax, shrink=0.85)
-    fig2.suptitle(f"真值/预测等高线图和误差热力图")
+    _supt2_kw = {}
+    if fp_cjk is not None:
+        _supt2_kw["fontproperties"] = fp_cjk
+    fig2.suptitle(f"真值/预测等高线图和误差热力图", **_supt2_kw)
     plt.tight_layout()
     p2d = out / "single_case_contourf.png"
     plt.savefig(p2d, dpi=dpi, bbox_inches="tight")
@@ -502,9 +563,12 @@ def run_plot(
     axm[1].set_xlabel("y")
     axm[1].set_ylabel(r"Rel L2 ($\|e\|_2/\|p\|_2$ on slice)")
     axm[1].grid(True, alpha=0.3)
+    _supt3_kw = {"fontsize": 10}
+    if fp_cjk is not None:
+        _supt3_kw["fontproperties"] = fp_cjk
     fig3.suptitle(
         f"切片 Rel L2（sample={idx}；非 MSRE）",
-        fontsize=10,
+        **_supt3_kw,
     )
     plt.tight_layout()
     pm = out / "single_case_marginal_rel_l2.png"
