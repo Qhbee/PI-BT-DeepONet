@@ -54,6 +54,61 @@ SURFACE3D_ZLIM_ERROR = (-0.02, 0.02)  # 例: (-0.02, 0.02)
 SURFACE3D_ZLIM_ABS_ERROR = (0.0, 0.02)  # 例: (0.0, 0.02)
 SURFACE3D_ZLIM_SQ_ERROR = (0.0, 4.0e-4)  # 例: (0.0, 2.0e-4)
 
+# 2D contourf 各子图颜色范围；None = 该图按数据 min/max 自动拉伸。
+# 设为 (lo, hi) 时分层见 CONTOURF_LEVEL_STEP / CONTOURF_N_LEVELS；CONTOURF_EXTEND 控制 colorbar 尖头。
+CONTOURF_P_TRUE_VLIM: tuple[float, float] | None = (-0.01, 0.12)  # p_true
+CONTOURF_P_PRED_VLIM: tuple[float, float] | None = (-0.01, 0.12)  # p_pred
+CONTOURF_ERROR_VLIM: tuple[float, float] | None = (-0.02, 0.02)  # error
+# "both"：colorbar 两端为三角形，表示低于 lo / 高于 hi 的值用端点色；"neither"：整段矩形色标、无尖头（数据宜落在 [lo,hi] 内）。
+CONTOURF_EXTEND: str = "both"
+# 固定 vlim 时 contourf 的分层方式：CONTOURF_LEVEL_STEP 非 None 时按**间隔** np.arange(lo, hi, step)（末端不足一步会补上 hi）；
+# 为 None 时按**层数** np.linspace(lo, hi, CONTOURF_N_LEVELS)（默认 41 个 level）。
+CONTOURF_LEVEL_STEP: float | None = None
+CONTOURF_N_LEVELS: int = 41
+# 仅作用于前两张子图（p_true、p_pred）的 colorbar 刻度间隔；error 子图始终用 matplotlib 默认刻度。
+CONTOURF_COLORBAR_TICK_STEP: float | None = 0.01  # 例: 0.01
+# 传给 colorbar 的 extendfrac（尖角占色条长度比例）；None 用 Matplotlib 默认；略减小可减轻尖角与数字重叠。
+CONTOURF_COLORBAR_EXTENDFRAC: float | None = 0.03
+
+
+def _contourf_levels(lo: float, hi: float) -> np.ndarray:
+    if CONTOURF_LEVEL_STEP is not None and CONTOURF_LEVEL_STEP > 0:
+        step = float(CONTOURF_LEVEL_STEP)
+        levels = np.arange(lo, hi + 0.5 * step, step, dtype=np.float64)
+        if levels.size == 0:
+            return np.array([lo, hi], dtype=np.float64)
+        if levels[-1] < hi - 1e-12 * max(1.0, abs(hi)):
+            levels = np.append(levels, hi)
+        return levels
+    n = max(2, int(CONTOURF_N_LEVELS))
+    return np.linspace(lo, hi, n)
+
+
+def _apply_contourf_colorbar_ticks(cbar, lo: float | None, hi: float | None) -> None:
+    """仅前两张图：竖直 colorbar 刻度。有 vlim 时在 [lo,hi] 内按步长取点（FixedLocator），避免 MultipleLocator 在 extend 尖角段乱标。
+
+    主色带与尖角交界处对应 lo、hi：显式并入刻度，保证临界处仍有数字；无 vlim 时退回 MultipleLocator。
+    """
+    if CONTOURF_COLORBAR_TICK_STEP is None or CONTOURF_COLORBAR_TICK_STEP <= 0:
+        return
+    from matplotlib.ticker import FixedLocator, MultipleLocator
+
+    step = float(CONTOURF_COLORBAR_TICK_STEP)
+    if lo is None or hi is None:
+        cbar.ax.yaxis.set_major_locator(MultipleLocator(step))
+        cbar.ax.tick_params(axis="y", which="major", pad=9)
+        return
+
+    ticks = np.arange(lo, hi + 0.5 * step, step, dtype=np.float64)
+    ticks = ticks[(ticks >= lo - 1e-12) & (ticks <= hi + 1e-12)]
+    # 尖角与主色带边界（数据上的 lo/hi）：步长未对齐时也要显示
+    ticks = np.unique(np.concatenate([ticks, np.array([lo, hi], dtype=np.float64)]))
+    ticks = np.sort(ticks[(ticks >= lo - 1e-12) & (ticks <= hi + 1e-12)])
+    if ticks.size == 0:
+        ticks = np.linspace(lo, hi, max(3, min(11, int(np.ceil((hi - lo) / max(step, 1e-12))) + 1)))
+    cbar.ax.yaxis.set_major_locator(FixedLocator(ticks))
+    cbar.ax.tick_params(axis="y", which="major", pad=9)
+
 
 def _apply_surface3d_zlim(ax, zlim: tuple[float, float] | None) -> None:
     if zlim is not None:
@@ -528,18 +583,35 @@ def run_plot(
 
     # --- 2D contour ---
     fig2, axs = plt.subplots(1, 3, figsize=(12, 3.5))
+    _contourf_vlim = {
+        "p_true": CONTOURF_P_TRUE_VLIM,
+        "p_pred": CONTOURF_P_PRED_VLIM,
+        "error": CONTOURF_ERROR_VLIM,
+    }
     for ax, Z, title, cmap in zip(
         axs,
         [p_true, p_pred, err],
         ["p_true", "p_pred", "error"],
         ["jet", "jet", "coolwarm"],
     ):
-        tpc = ax.contourf(xx, yy, Z, levels=40, cmap=cmap)
+        vlim = _contourf_vlim[title]
+        if vlim is not None:
+            lo, hi = vlim
+            levels = _contourf_levels(lo, hi)
+            tpc = ax.contourf(xx, yy, Z, levels=levels, cmap=cmap, extend=CONTOURF_EXTEND)
+        else:
+            tpc = ax.contourf(xx, yy, Z, levels=40, cmap=cmap)
         ax.set_aspect("equal")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_title(title)
-        fig2.colorbar(tpc, ax=ax, shrink=0.85)
+        cbar_kw = {}
+        if CONTOURF_COLORBAR_EXTENDFRAC is not None:
+            cbar_kw["extendfrac"] = float(CONTOURF_COLORBAR_EXTENDFRAC)
+        cbar = fig2.colorbar(tpc, ax=ax, shrink=0.85, **cbar_kw)
+        if title in ("p_true", "p_pred"):
+            lo_hi = vlim if vlim is not None else (None, None)
+            _apply_contourf_colorbar_ticks(cbar, lo_hi[0], lo_hi[1])
     _supt2_kw = {}
     if fp_cjk is not None:
         _supt2_kw["fontproperties"] = fp_cjk
