@@ -7,14 +7,19 @@
 
 **用法**（在项目根目录）::
 
-    python scripts/paper/plot_exp2_poisson_single_case.py \\
-        --run_dir experiments/paper/exp2_poisson_2d/run_YYYYMMDD_HHMMSS \\
-        --model_name transformer_deeponet \\
-        --checkpoint latest.pt
+    # 默认使用本仓库 run_pi_deeponet_smoke + pi_deeponet + fnn + dpi/grid_n 见 DEFAULT_* 常量
+    uv run python scripts/paper/plot_exp2_poisson_single_case.py
 
-可选 ``--best_test``：在测试集上按与训练相同的 query 点算 rel_l2，选误差最小的样本再画稠密网格图。
+    # 指定其它 run
+    uv run python scripts/paper/plot_exp2_poisson_single_case.py \\
+        --run_dir experiments/paper/exp2_poisson_2d/run_YYYYMMDD_HHMMSS \\
+        --model_name pi_deeponet --branch fnn
+
+默认 **不指定 ``--sample_index``** 时，在测试集上按与训练相同的 query 点算 rel_l2，**自动取最小者** 对应的样本。指定 ``--sample_index k`` 则用第 k 条。
 
 需要 ``config.json`` 与 ``<model_name>/checkpoints/*.pt`` 与训练时一致；数据用相同 ``seed`` 与参数通过 ``generate_poisson_2d_data(..., return_coeffs=True)`` 重现，以得到解析真值。
+
+PNG 默认写入仓库根下 ``thesis/figures/``（``DEFAULT_OUT_DIR``）；可用 ``--out_dir`` 覆盖。
 """
 
 from __future__ import annotations
@@ -30,6 +35,42 @@ import torch
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
+
+
+# 默认与 smoke 实验 ``run_pi_deeponet_smoke`` 一致；无参运行脚本时直接使用
+DEFAULT_RUN_DIR = _project_root() / "experiments/paper/exp2_poisson_2d/run_pi_deeponet_smoke"
+DEFAULT_MODEL_NAME = "pi_deeponet"
+DEFAULT_BRANCH = "fnn"
+DEFAULT_GRID_N = 80
+DEFAULT_DPI = 200
+DEFAULT_OUT_DIR = _project_root() / "thesis" / "figures"
+
+
+def _configure_matplotlib_chinese_font() -> None:
+    """优先使用系统中文字体（Windows 常见为 Microsoft YaHei / SimHei），避免 CJK 显示为方框。"""
+    import matplotlib
+    from matplotlib import font_manager
+
+    keywords = (
+        "YaHei",
+        "SimHei",
+        "SimSun",
+        "Noto Sans CJK",
+        "PingFang",
+        "Heiti",
+        "Song",
+        "WenQuanYi",
+        "Source Han",
+    )
+    picked: list[str] = []
+    for f in font_manager.fontManager.ttflist:
+        name = f.name
+        if any(kw in name for kw in keywords):
+            picked.append(name)
+            break
+    if picked:
+        matplotlib.rcParams["font.sans-serif"] = picked + ["DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
 
 
 def _load_config(run_dir: Path) -> dict:
@@ -184,6 +225,71 @@ def _marginal_rel_l2(err: np.ndarray, p_true: np.ndarray) -> tuple[np.ndarray, n
     return x_coords, rel_x, y_coords, rel_y
 
 
+def _branch_u_panel_text_compact(
+    u_flat: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    idx: int,
+    nx: int,
+    ny: int,
+    max_mode: int,
+    picked_by_best: bool,
+    query_rel_l2: float | None,
+) -> str:
+    """第一行第三列信息框用（简短）；论文中完整数值见同目录 single_case_branch_u.txt。"""
+    u = np.asarray(u_flat, dtype=np.float64).ravel()
+    c = np.asarray(coeffs, dtype=np.float64).ravel()
+    n = u.size
+    lines = [
+        "Branch 输入 u",
+        f"f 在 {nx}×{ny} 网格采样，N={n}",
+        f"测试索引 k={idx}" + ("（best）" if picked_by_best else ""),
+    ]
+    if query_rel_l2 is not None:
+        lines.append(f"rel_l2@query={query_rel_l2:.5f}")
+    lines.append(
+        f"u: min={u.min():.4g} max={u.max():.4g} ‖u‖₂={np.linalg.norm(u):.4g}"
+    )
+    lines.append("Fourier 系数 a:")
+    lines.append(np.array2string(c, precision=4, max_line_width=42))
+    lines.append("u 前 6 项:")
+    lines.append(np.array2string(u[:6], precision=4, max_line_width=42))
+    return "\n".join(lines)
+
+
+def _save_branch_u_file(
+    out: Path,
+    u_flat: np.ndarray,
+    coeffs: np.ndarray,
+    *,
+    idx: int,
+    nx: int,
+    ny: int,
+    max_mode: int,
+    picked_by_best: bool,
+    query_rel_l2: float | None,
+    cfg_seed: int,
+) -> None:
+    """论文可引用的完整 u 与元数据（文本）。"""
+    u = np.asarray(u_flat, dtype=np.float64).ravel()
+    c = np.asarray(coeffs, dtype=np.float64).ravel()
+    path = out / "single_case_branch_u.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(
+            "# Branch 输入 u：右端项 f 在均匀传感器网格上的离散值（与 generate_poisson_2d_data 中 u_test[k] 一致）\n"
+        )
+        f.write(f"# nx={nx} ny={ny} N={u.size}  meshgrid indexing=xy 展平顺序与训练数据一致\n")
+        f.write(f"# 测试集样本索引 k={idx}  seed={cfg_seed}  best_test={picked_by_best}\n")
+        if query_rel_l2 is not None:
+            f.write(f"# query 点 rel_l2={query_rel_l2:.18e}\n")
+        f.write(f"# Fourier 系数 a (维度 {c.size})，真解由 a 解析给出:\n")
+        f.write("# " + " ".join(f"{float(x):.18e}" for x in c) + "\n")
+        f.write("# --- u 分量 i, u_i ---\n")
+        for i, v in enumerate(u):
+            f.write(f"{i}\t{v:.18e}\n")
+    print(f"[saved] {path}")
+
+
 def run_plot(
     *,
     run_dir: Path,
@@ -191,16 +297,18 @@ def run_plot(
     checkpoint: str | None,
     branch: str,
     bayesian: bool,
-    sample_index: int,
-    best_test: bool,
+    sample_index: int | None,
     grid_n: int,
     dpi: int,
     eval_mc_samples: int | None,
     out_dir: Path | None,
+    use_cjk_font: bool = True,
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
+    if use_cjk_font:
+        _configure_matplotlib_chinese_font()
     import matplotlib.pyplot as plt
 
     root = _project_root()
@@ -238,8 +346,9 @@ def run_plot(
     s_test = data["s_test"]
 
     n_test = u_test.shape[0]
-    idx = sample_index
-    if best_test:
+    query_rel_l2: float | None = None
+    picked_by_best: bool
+    if sample_index is None:
         rels = []
         for i in range(n_test):
             r = _rel_l2_on_queries(
@@ -253,10 +362,27 @@ def run_plot(
             )
             rels.append(r)
         idx = int(np.argmin(np.array(rels)))
-        print(f"[best_test] chose sample index {idx} with rel_l2={rels[idx]:.6f}")
+        query_rel_l2 = float(rels[idx])
+        picked_by_best = True
+        print(f"[best_test] chose sample index {idx} with rel_l2={query_rel_l2:.6f}")
+    else:
+        idx = int(sample_index)
+        if idx < 0 or idx >= n_test:
+            raise ValueError(f"sample_index={idx} out of range [0, {n_test})")
+        picked_by_best = False
+        query_rel_l2 = _rel_l2_on_queries(
+            model,
+            u_test[idx],
+            y_test[idx],
+            s_test[idx],
+            bayesian=bayesian,
+            eval_mc_samples=eval_mc_samples,
+            device=device,
+        )
 
     coeffs = coeffs_test[idx]
     u_one = u_test[idx : idx + 1]
+    u_flat_for_meta = u_test[idx].copy()
 
     xs = np.linspace(0.0, 1.0, grid_n, dtype=np.float64)
     ys = np.linspace(0.0, 1.0, grid_n, dtype=np.float64)
@@ -274,8 +400,32 @@ def run_plot(
     abs_err = np.abs(err)
     sq_err = err**2
 
-    out = out_dir or (model_dir / "figures_single_case")
+    out = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
     out.mkdir(parents=True, exist_ok=True)
+
+    _save_branch_u_file(
+        out,
+        u_flat_for_meta,
+        coeffs,
+        idx=idx,
+        nx=int(cfg["nx"]),
+        ny=int(cfg["ny"]),
+        max_mode=int(cfg["max_mode"]),
+        picked_by_best=picked_by_best,
+        query_rel_l2=query_rel_l2,
+        cfg_seed=int(cfg["seed"]),
+    )
+
+    panel_txt = _branch_u_panel_text_compact(
+        u_flat_for_meta,
+        coeffs,
+        idx=idx,
+        nx=int(cfg["nx"]),
+        ny=int(cfg["ny"]),
+        max_mode=int(cfg["max_mode"]),
+        picked_by_best=picked_by_best,
+        query_rel_l2=query_rel_l2,
+    )
 
     # --- 3D: 2 rows — pred, true | error, abs, sq ---
     fig = plt.figure(figsize=(12, 8))
@@ -294,14 +444,24 @@ def run_plot(
     surf(ax0, p_pred, "pred")
     ax1 = fig.add_subplot(2, 3, 2, projection="3d")
     surf(ax1, p_true, "true")
-    fig.add_subplot(2, 3, 3).set_visible(False)
+    ax_u = fig.add_subplot(2, 3, 3)
+    ax_u.axis("off")
+    ax_u.text(
+        0.02,
+        0.98,
+        panel_txt,
+        transform=ax_u.transAxes,
+        va="top",
+        ha="left",
+        fontsize=7.5,
+    )
     ax2 = fig.add_subplot(2, 3, 4, projection="3d")
     surf(ax2, err, "error", zlabel="value")
     ax3 = fig.add_subplot(2, 3, 5, projection="3d")
     surf(ax3, abs_err, "abs error", zlabel="value")
     ax4 = fig.add_subplot(2, 3, 6, projection="3d")
     surf(ax4, sq_err, "square error", zlabel="value")
-    fig.suptitle(f"单算子可视化 (sample={idx}, ckpt={ckpt_path.name})", fontsize=11)
+    fig.suptitle(f"固定输入u后函数p(x,y)的预测、真值、误差可视化", fontsize=11)
     plt.tight_layout()
     p3d = out / "single_case_3d_surfaces.png"
     plt.savefig(p3d, dpi=dpi, bbox_inches="tight")
@@ -322,7 +482,7 @@ def run_plot(
         ax.set_ylabel("y")
         ax.set_title(title)
         fig2.colorbar(tpc, ax=ax, shrink=0.85)
-    fig2.suptitle(f"Contour (sample={idx})")
+    fig2.suptitle(f"真值/预测等高线图和误差热力图")
     plt.tight_layout()
     p2d = out / "single_case_contourf.png"
     plt.savefig(p2d, dpi=dpi, bbox_inches="tight")
@@ -343,7 +503,7 @@ def run_plot(
     axm[1].set_ylabel(r"Rel L2 ($\|e\|_2/\|p\|_2$ on slice)")
     axm[1].grid(True, alpha=0.3)
     fig3.suptitle(
-        f"Slice-wise Rel L2 (not MSRE; sample={idx})",
+        f"切片 Rel L2（sample={idx}；非 MSRE）",
         fontsize=10,
     )
     plt.tight_layout()
@@ -355,30 +515,47 @@ def run_plot(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Plot single-operator figures for exp2 Poisson 2D.")
-    p.add_argument("--run_dir", type=Path, required=True, help="Path to run_YYYYMMDD_... (contains config.json)")
-    p.add_argument("--model_name", type=str, default="transformer_deeponet", help="Subfolder under run_dir")
+    p.add_argument(
+        "--run_dir",
+        type=Path,
+        default=None,
+        help=f"Run dir with config.json (default: {DEFAULT_RUN_DIR.name}, from repo root)",
+    )
+    p.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME, help="Subfolder under run_dir")
     p.add_argument("--checkpoint", type=str, default=None, help="e.g. epoch_200.pt or latest.pt; default: latest or max epoch")
-    p.add_argument("--branch", type=str, choices=("transformer", "fnn"), default="transformer")
+    p.add_argument("--branch", type=str, choices=("transformer", "fnn"), default=DEFAULT_BRANCH)
     p.add_argument("--bayesian", action="store_true", help="Load BayesianDeepONet checkpoint")
-    p.add_argument("--sample_index", type=int, default=0, help="Test sample index (ignored if --best_test)")
-    p.add_argument("--best_test", action="store_true", help="Pick test sample with smallest rel_l2 on query points")
-    p.add_argument("--grid_n", type=int, default=64, help="Dense grid resolution per axis")
-    p.add_argument("--dpi", type=int, default=150)
+    p.add_argument(
+        "--sample_index",
+        type=int,
+        default=None,
+        help="测试集样本索引；省略则默认按 query 点 rel_l2 最小选取（原 best_test）",
+    )
+    p.add_argument("--grid_n", type=int, default=DEFAULT_GRID_N, help="Dense grid resolution per axis")
+    p.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     p.add_argument("--eval_mc_samples", type=int, default=None, help="MC draws for Bayesian mean (default: config)")
-    p.add_argument("--out_dir", type=Path, default=None, help="Output directory (default: run_dir/model_name/figures_single_case)")
+    p.add_argument(
+        "--out_dir",
+        type=Path,
+        default=None,
+        help=f"Output directory (default: thesis/figures -> {DEFAULT_OUT_DIR})",
+    )
+    p.add_argument("--no_cjk_font", action="store_true", help="Do not set matplotlib Chinese font (use default DejaVu)")
     args = p.parse_args()
+    run_dir = DEFAULT_RUN_DIR if args.run_dir is None else Path(args.run_dir)
+    out_plot = args.out_dir.resolve() if args.out_dir is not None else None
     run_plot(
-        run_dir=args.run_dir.resolve(),
+        run_dir=run_dir.resolve(),
         model_name=args.model_name,
         checkpoint=args.checkpoint,
         branch=args.branch,
         bayesian=args.bayesian,
         sample_index=args.sample_index,
-        best_test=args.best_test,
         grid_n=args.grid_n,
         dpi=args.dpi,
         eval_mc_samples=args.eval_mc_samples,
-        out_dir=args.out_dir.resolve() if args.out_dir else None,
+        out_dir=out_plot,
+        use_cjk_font=not args.no_cjk_font,
     )
 
 
