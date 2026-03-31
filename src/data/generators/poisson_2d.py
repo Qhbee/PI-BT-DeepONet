@@ -57,6 +57,21 @@ def _fourier_to_solution(
     return out
 
 
+def fourier_to_solution(
+    coeffs: np.ndarray,
+    xx: np.ndarray,
+    yy: np.ndarray,
+    max_mode: int,
+) -> np.ndarray:
+    """Ground-truth solution p on a grid; public alias for visualization and tests.
+
+    Args:
+        coeffs: 1D array of length max_mode**2 (single sample) or flattened.
+    """
+    c = np.asarray(coeffs, dtype=np.float32).reshape(-1)
+    return _fourier_to_solution(c, xx, yy, max_mode)
+
+
 @register("poisson_2d")
 def generate_poisson_2d_data(
     n_train: int = 300,
@@ -68,6 +83,7 @@ def generate_poisson_2d_data(
     length_scale: float = 2.0,
     seed: int | None = 42,
     query_sampling: str = "uniform",
+    return_coeffs: bool = False,
 ) -> dict:
     """
     2D Poisson: -∇²p = f on [0,1]², p=0 on boundary.
@@ -81,6 +97,8 @@ def generate_poisson_2d_data(
         length_scale: GRF length scale for coefficient sampling
         seed: random seed
         query_sampling: "uniform" (regular grid) or "random" (uniform in [0,1]²)
+        return_coeffs: If True, include coeffs_train / coeffs_test (shape n_samples × max_mode²)
+            aligned with u_train / u_test for analytic p on arbitrary grids.
     """
     rng = np.random.default_rng(seed)
     n_sensors = nx * ny
@@ -117,13 +135,13 @@ def generate_poisson_2d_data(
             dtype=np.float32,
         )
         p_at_query = p_at_query[:, :, np.newaxis]
-        return u_flat, xy_query.astype(np.float32), p_at_query
+        return u_flat, xy_query.astype(np.float32), p_at_query, coeffs
 
-    u_train, y_train, s_train = sample_batch(n_train)
-    u_test, y_test, s_test = sample_batch(n_test)
+    u_train, y_train, s_train, coeffs_train = sample_batch(n_train)
+    u_test, y_test, s_test, coeffs_test = sample_batch(n_test)
 
     x_sensors = np.stack([xx_sens.reshape(-1), yy_sens.reshape(-1)], axis=-1).astype(np.float32)
-    return {
+    out: dict = {
         "u_train": u_train,
         "y_train": y_train,
         "s_train": s_train,
@@ -136,3 +154,7 @@ def generate_poisson_2d_data(
         "grid_shape": (ny, nx),
         "domain": {"min": [0.0, 0.0], "max": [1.0, 1.0]},
     }
+    if return_coeffs:
+        out["coeffs_train"] = coeffs_train
+        out["coeffs_test"] = coeffs_test
+    return out
