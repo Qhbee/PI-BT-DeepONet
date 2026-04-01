@@ -220,28 +220,34 @@ def _domain_from_cfg(cfg: dict) -> tuple[float, float]:
     return 0.0, 1.0
 
 
-def default_classic_cases(
-    delta_rational: float = 1.0,
-) -> list[tuple[str, str, Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]]]:
+def default_classic_cases() -> (
+    list[tuple[str, str, Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]]]
+):
     """(f 的 mathtext, s 的 mathtext, f(x), s(x)=∫_0^x f). 均在 [0,1] 上数值稳定；s 的式子与 s(0)=0 一致。"""
 
-    def f_x(x: np.ndarray) -> np.ndarray:
+    def f_one(_x: np.ndarray) -> np.ndarray:
+        return np.ones_like(_x, dtype=np.float64)
+
+    def s_one(x: np.ndarray) -> np.ndarray:
         return x
 
-    def s_x(x: np.ndarray) -> np.ndarray:
-        return x**2 / 2.0
+    def f_2x(x: np.ndarray) -> np.ndarray:
+        return 2.0 * x
 
-    def f_x2(x: np.ndarray) -> np.ndarray:
+    def s_2x(x: np.ndarray) -> np.ndarray:
         return x**2
 
-    def s_x2(x: np.ndarray) -> np.ndarray:
-        return x**3 / 3.0
+    def f_3x2(x: np.ndarray) -> np.ndarray:
+        return 3.0 * x**2
 
-    def f_x3(x: np.ndarray) -> np.ndarray:
+    def s_3x2(x: np.ndarray) -> np.ndarray:
         return x**3
 
-    def s_x3(x: np.ndarray) -> np.ndarray:
-        return x**4 / 4.0
+    def f_inv_x1(x: np.ndarray) -> np.ndarray:
+        return 1.0 / (x + 1.0)
+
+    def s_inv_x1(x: np.ndarray) -> np.ndarray:
+        return np.log(x + 1.0)
 
     def f_exp(x: np.ndarray) -> np.ndarray:
         return np.exp(x)
@@ -256,24 +262,16 @@ def default_classic_cases(
         return (1.0 + x) * np.log(1.0 + x) - x
 
     def f_sin(x: np.ndarray) -> np.ndarray:
-        return np.sin(x)
+        return np.sin(np.pi * x)
 
     def s_sin(x: np.ndarray) -> np.ndarray:
-        return 1.0 - np.cos(x)
+        return (1.0 / np.pi) * (1.0 - np.cos(np.pi * x))
 
     def f_cos(x: np.ndarray) -> np.ndarray:
-        return np.cos(x)
+        return np.cos(np.pi * x)
 
     def s_cos(x: np.ndarray) -> np.ndarray:
-        return np.sin(x)
-
-    d = float(delta_rational)
-
-    def f_rat(x: np.ndarray) -> np.ndarray:
-        return 1.0 / (x + d)
-
-    def s_rat(x: np.ndarray) -> np.ndarray:
-        return np.log(x + d) - np.log(d)
+        return (1.0 / np.pi) * np.sin(np.pi * x)
 
     def f_sqrt(x: np.ndarray) -> np.ndarray:
         return np.sqrt(np.maximum(x, 0.0))
@@ -301,14 +299,29 @@ def default_classic_cases(
         return np.tanh(x)
 
     return [
-        (r"$f(x)=x$", r"$s(x)=x^2/2$", f_x, s_x),
-        (r"$f(x)=x^2$", r"$s(x)=x^3/3$", f_x2, s_x2),
-        (r"$f(x)=x^3$", r"$s(x)=x^4/4$", f_x3, s_x3),
+        (r"$f(x)=1$", r"$s(x)=x$", f_one, s_one),
+        (r"$f(x)=2x$", r"$s(x)=x^2$", f_2x, s_2x),
+        (r"$f(x)=3x^2$", r"$s(x)=x^3$", f_3x2, s_3x2),
+        (r"$f(x)=1/(x+1)$", r"$s(x)=\ln(1+x)$", f_inv_x1, s_inv_x1),
         (r"$f(x)=e^x$", r"$s(x)=e^x-1$", f_exp, s_exp),
-        (r"$f(x)=\ln(1+x)$", r"$s(x)=(1+x)\ln(1+x)-x$", f_ln1p, s_ln1p),
-        (r"$f(x)=\sin x$", r"$s(x)=1-\cos x$", f_sin, s_sin),
-        (r"$f(x)=\cos x$", r"$s(x)=\sin x$", f_cos, s_cos),
-        (rf"$f(x)=1/(x+{d:g})$", rf"$s(x)=\ln(x+{d:g})-\ln({d:g})$", f_rat, s_rat),
+        (
+            r"$f(x)=\ln(1+x)$",
+            r"$s(x)=(1+x)\ln(1+x)-x$",
+            f_ln1p,
+            s_ln1p,
+        ),
+        (
+            r"$f(x)=\sin(\pi x)$",
+            r"$s(x)=\frac{1}{\pi}(1-\cos(\pi x))$",
+            f_sin,
+            s_sin,
+        ),
+        (
+            r"$f(x)=\cos(\pi x)$",
+            r"$s(x)=\frac{1}{\pi}\sin(\pi x)$",
+            f_cos,
+            s_cos,
+        ),
         (r"$f(x)=\sqrt{x}$", r"$s(x)=\frac{2}{3}x^{3/2}$", f_sqrt, s_sqrt),
         (r"$f(x)=\tanh x$", r"$s(x)=\ln(\cosh x)$", f_tanh, s_tanh),
         (r"$f(x)=1/(1+x^2)$", r"$s(x)=\arctan x$", f_arctan_prime, s_arctan),
@@ -331,7 +344,6 @@ def run_plot(
     nrows: int,
     ncols: int,
     max_panels: int | None,
-    delta_rational: float,
     use_cjk_font: bool,
     show_legend_panel: int,
 ) -> None:
@@ -370,7 +382,7 @@ def run_plot(
     _load_weights(model, ckpt_path, device)
     model.to(device)
 
-    cases = default_classic_cases(delta_rational=delta_rational)
+    cases = default_classic_cases()
     if max_panels is not None:
         cases = cases[: max(1, max_panels)]
 
@@ -390,8 +402,8 @@ def run_plot(
             model, u_t, y_t, bayesian=bayesian, eval_mc_samples=eval_mc_samples, device=device
         )
 
-        ax.plot(x_query, s_true, color="0.2", lw=1.8, label="true $s(x)$")
-        ax.plot(x_query, s_pred, color="C0", lw=1.5, ls="--", label=r"pred $\hat{s}(x)$")
+        ax.plot(x_query, s_true, color="red", lw=1.8, label="true $s(x)$")
+        ax.plot(x_query, s_pred, color="blue", lw=1.5, ls="--", label=r"pred $\hat{s}(x)$")
         ax.set_title(f"{f_tex}\n{s_tex}", fontsize=9)
         ax.set_xlabel("$x$", fontsize=9)
         ax.set_ylabel("$s(x)$", fontsize=9)
@@ -441,12 +453,6 @@ def main() -> None:
     p.add_argument("--nrows", type=int, default=3)
     p.add_argument("--ncols", type=int, default=4)
     p.add_argument("--max_panels", type=int, default=None, help="仅用前 K 个经典函数")
-    p.add_argument(
-        "--delta_rational",
-        type=float,
-        default=1.0,
-        help="有理项 1/(x+δ) 中的 δ，避免 x=0 奇性",
-    )
     p.add_argument("--no_cjk_font", action="store_true", help="总标题不用中文字体探测")
     p.add_argument(
         "--legend_panel",
@@ -470,7 +476,6 @@ def main() -> None:
         nrows=args.nrows,
         ncols=args.ncols,
         max_panels=args.max_panels,
-        delta_rational=args.delta_rational,
         use_cjk_font=not args.no_cjk_font,
         show_legend_panel=args.legend_panel,
     )
