@@ -213,8 +213,10 @@ def _domain_from_cfg(cfg: dict) -> tuple[float, float]:
     return 0.0, 1.0
 
 
-def default_classic_cases(delta_rational: float = 0.1) -> list[tuple[str, Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]]]:
-    """(子图标题 mathtext, f(x), s(x)=∫_0^x f). 均在 [0,1] 上数值稳定。"""
+def default_classic_cases(
+    delta_rational: float = 1.0,
+) -> list[tuple[str, str, Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]]]:
+    """(f 的 mathtext, s 的 mathtext, f(x), s(x)=∫_0^x f). 均在 [0,1] 上数值稳定；s 的式子与 s(0)=0 一致。"""
 
     def f_x(x: np.ndarray) -> np.ndarray:
         return x
@@ -292,18 +294,18 @@ def default_classic_cases(delta_rational: float = 0.1) -> list[tuple[str, Callab
         return np.tanh(x)
 
     return [
-        (r"$f(x)=x$", f_x, s_x),
-        (r"$f(x)=x^2$", f_x2, s_x2),
-        (r"$f(x)=x^3$", f_x3, s_x3),
-        (r"$f(x)=e^x$", f_exp, s_exp),
-        (r"$f(x)=\ln(1+x)$", f_ln1p, s_ln1p),
-        (r"$f(x)=\sin x$", f_sin, s_sin),
-        (r"$f(x)=\cos x$", f_cos, s_cos),
-        (rf"$f(x)=1/(x+{delta_rational:g})$", f_rat, s_rat),
-        (r"$f(x)=\sqrt{x}$", f_sqrt, s_sqrt),
-        (r"$f(x)=\tanh x$", f_tanh, s_tanh),
-        (r"$f(x)=1/(1+x^2)$", f_arctan_prime, s_arctan),
-        (r"$f(x)=\mathrm{sech}^2 x$", f_sech2, s_sech2),
+        (r"$f(x)=x$", r"$s(x)=x^2/2$", f_x, s_x),
+        (r"$f(x)=x^2$", r"$s(x)=x^3/3$", f_x2, s_x2),
+        (r"$f(x)=x^3$", r"$s(x)=x^4/4$", f_x3, s_x3),
+        (r"$f(x)=e^x$", r"$s(x)=e^x-1$", f_exp, s_exp),
+        (r"$f(x)=\ln(1+x)$", r"$s(x)=(1+x)\ln(1+x)-x$", f_ln1p, s_ln1p),
+        (r"$f(x)=\sin x$", r"$s(x)=1-\cos x$", f_sin, s_sin),
+        (r"$f(x)=\cos x$", r"$s(x)=\sin x$", f_cos, s_cos),
+        (rf"$f(x)=1/(x+{d:g})$", rf"$s(x)=\ln(x+{d:g})-\ln({d:g})$", f_rat, s_rat),
+        (r"$f(x)=\sqrt{x}$", r"$s(x)=\frac{2}{3}x^{3/2}$", f_sqrt, s_sqrt),
+        (r"$f(x)=\tanh x$", r"$s(x)=\ln(\cosh x)$", f_tanh, s_tanh),
+        (r"$f(x)=1/(1+x^2)$", r"$s(x)=\arctan x$", f_arctan_prime, s_arctan),
+        (r"$f(x)=\mathrm{sech}^2 x$", r"$s(x)=\tanh x$", f_sech2, s_sech2),
     ]
 
 
@@ -371,7 +373,7 @@ def run_plot(
 
     y_t = torch.from_numpy(x_query.astype(np.float32)).reshape(1, -1, 1)
 
-    for k, (title_tex, f_fn, s_fn) in enumerate(cases):
+    for k, (f_tex, s_tex, f_fn, s_fn) in enumerate(cases):
         ax = flat[k]
         u = f_fn(x_sensors).astype(np.float32)
         u_t = torch.from_numpy(u).unsqueeze(0)
@@ -383,7 +385,7 @@ def run_plot(
 
         ax.plot(x_query, s_true, color="0.2", lw=1.8, label="true $s(x)$")
         ax.plot(x_query, s_pred, color="C0", lw=1.5, ls="--", label=r"pred $\hat{s}(x)$")
-        ax.set_title(title_tex, fontsize=10)
+        ax.set_title(f"{f_tex}\n{s_tex}", fontsize=9)
         ax.set_xlabel("$x$", fontsize=9)
         ax.set_ylabel("$s(x)$", fontsize=9)
         ax.tick_params(labelsize=8)
@@ -425,7 +427,7 @@ def main() -> None:
     p.add_argument(
         "--delta_rational",
         type=float,
-        default=0.1,
+        default=1.0,
         help="有理项 1/(x+δ) 中的 δ，避免 x=0 奇性",
     )
     p.add_argument("--no_cjk_font", action="store_true", help="总标题不用中文字体探测")
