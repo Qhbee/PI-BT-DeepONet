@@ -13,6 +13,33 @@
 \usepackage{subfigure}%子图http://www.ctex.org/documents/latex/graphics/node111.html
 \usepackage{chemfig}%化学式
 \usetikzlibrary{trees}
+% 浮动体（figure/table）尽量靠近正文（放宽默认每页浮动数量与面积限制）。
+% 减少图表被整体推到后面几页的情况；若仍有个别表图滞后，可对单处使用 [!htbp]。
+% --- 浮动体（figure/table）参数说明（与 cleveref 无关；cleveref 只管 \cref 等引用文案）---
+% 位置可选参数 [htbp]：h=本页靠后处，t=页顶，b=页底，p=仅含浮动体的独立页；顺序表示尝试顺序。
+% [!htbp] 多一个 !：对该浮动体放宽“每页浮动面积/正文比例”等限制，更容易排在近处，仍非绝对保证。
+% 以下“标准默认”指 LaTeX 内核 article/book 类常用初值（10/11/12pt 下略有差异时可忽略小数）。
+%
+% 计数器：一页上允许放置的浮动体个数上限（标准默认：topnumber=2，bottomnumber=1，totalnumber=3）。
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{4}
+\setcounter{totalnumber}{10}
+%
+% \topfraction：页顶浮动体总高度最多占页高的比例（默认约 0.7）。
+% \bottomfraction：页底类似（默认约 0.3）。
+% \textfraction：页顶/页底已有浮动体时，正文至少占页高的比例（默认约 0.2）。
+% \floatpagefraction：单独浮动页上，浮动体至少占页高的比例才愿成页（默认约 0.5）。
+\renewcommand{\topfraction}{0.80}
+\renewcommand{\bottomfraction}{0.80}
+\renewcommand{\textfraction}{0.20}
+\renewcommand{\floatpagefraction}{0.80}
+%
+% \textfloatsep：页顶/页底浮动体与相邻正文之间的竖直间距（默认约 20pt plus 2pt minus 4pt）。
+% \floatsep：同一页上相邻两个浮动体之间的间距（默认约 12pt plus 2pt minus 2pt）。
+% \intextsep：使用 h 插在正文中间时，浮动体上下与正文的间距（默认约 12pt plus 2pt minus 2pt）。
+\setlength{\textfloatsep}{14pt plus 4pt minus 3pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{10pt plus 2pt minus 2pt}
 
 
 
