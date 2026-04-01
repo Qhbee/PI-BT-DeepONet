@@ -18,10 +18,10 @@ from src.training.trainer import train_antiderivative
 
 def main() -> None:
     cfg = {
-        "n_train": 200,
-        "n_test": 50,
+        "n_train": 800,
+        "n_test": 200,
         "n_sensors": 50,
-        "n_points_per_sample": 10,
+        "n_points_per_sample": 50,
         "length_scale": 0.5,
         "seed": 42,
         "output_dim": 20,
@@ -63,8 +63,8 @@ def main() -> None:
         **cfg,
         "lr": 0.001,
         "batch_size": 64,
-        "epochs": 50,
-        "pi_weight": 0.1,
+        "epochs": 200,
+        "pi_weight": 0.2,
         "bc_weight": 1.0,
         "ic_weight": 1.0,
         "n_collocation": 128,
@@ -98,7 +98,7 @@ def main() -> None:
         checkpoint_dir=str(ckpt_dir),
         eval_every=5,
         early_stop=True,
-        early_stop_patience=20,
+        early_stop_patience=25,
         early_stop_metric="rel_l2",
     )
 
