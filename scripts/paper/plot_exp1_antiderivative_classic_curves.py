@@ -232,16 +232,16 @@ def default_classic_cases() -> (
         return x
 
     def f_2x(x: np.ndarray) -> np.ndarray:
-        return 2.0 * x
+        return 2.0 * (x - 0.5)
 
     def s_2x(x: np.ndarray) -> np.ndarray:
-        return x**2
+        return x**2 - x
 
     def f_3x2(x: np.ndarray) -> np.ndarray:
-        return 3.0 * x**2
+        return 3.0 * (x - 0.5) ** 2
 
     def s_3x2(x: np.ndarray) -> np.ndarray:
-        return x**3
+        return (x - 0.5) ** 3 + 0.125
 
     def f_inv_x1(x: np.ndarray) -> np.ndarray:
         return 1.0 / (x + 1.0)
@@ -261,6 +261,8 @@ def default_classic_cases() -> (
     def s_ln1p(x: np.ndarray) -> np.ndarray:
         return (1.0 + x) * np.log(1.0 + x) - x
 
+    _tau = 2.0 * np.pi
+
     def f_sin(x: np.ndarray) -> np.ndarray:
         return np.sin(np.pi * x)
 
@@ -268,16 +270,17 @@ def default_classic_cases() -> (
         return (1.0 / np.pi) * (1.0 - np.cos(np.pi * x))
 
     def f_cos(x: np.ndarray) -> np.ndarray:
-        return np.cos(np.pi * x)
+        return np.cos(2.0 * np.pi * x)
 
     def s_cos(x: np.ndarray) -> np.ndarray:
-        return (1.0 / np.pi) * np.sin(np.pi * x)
+        return (0.5 / np.pi) * np.sin(2.0 * np.pi * x)
 
-    def f_sqrt(x: np.ndarray) -> np.ndarray:
-        return np.sqrt(np.maximum(x, 0.0))
+    def f_neg_inv_sq(x: np.ndarray) -> np.ndarray:
+        return -1.0 / (x + 1.0) ** 2
 
-    def s_sqrt(x: np.ndarray) -> np.ndarray:
-        return (2.0 / 3.0) * np.power(np.maximum(x, 0.0), 1.5)
+    def s_inv_shift(x: np.ndarray) -> np.ndarray:
+        """原函数 1/(x+1)，与 f 配套；配合 run_plot 中减去 s(lo) 得 s(x)=1/(x+1)-1/s(lo+1)，lo=0 时为 1/(x+1)-1。"""
+        return 1.0 / (x + 1.0)
 
     def f_tanh(x: np.ndarray) -> np.ndarray:
         return np.tanh(x)
@@ -300,8 +303,18 @@ def default_classic_cases() -> (
 
     return [
         (r"$f(x)=1$", r"$s(x)=x$", f_one, s_one),
-        (r"$f(x)=2x$", r"$s(x)=x^2$", f_2x, s_2x),
-        (r"$f(x)=3x^2$", r"$s(x)=x^3$", f_3x2, s_3x2),
+        (
+            r"$f(x)=2(x-\frac{1}{2})$",
+            r"$s(x)=x^2-x$",
+            f_2x,
+            s_2x,
+        ),
+        (
+            r"$f(x)=3(x-\frac{1}{2})^2$",
+            r"$s(x)=(x-\frac{1}{2})^3+\frac{1}{8}$",
+            f_3x2,
+            s_3x2,
+        ),
         (r"$f(x)=1/(x+1)$", r"$s(x)=\ln(1+x)$", f_inv_x1, s_inv_x1),
         (r"$f(x)=e^x$", r"$s(x)=e^x-1$", f_exp, s_exp),
         (
@@ -317,12 +330,17 @@ def default_classic_cases() -> (
             s_sin,
         ),
         (
-            r"$f(x)=\cos(\pi x)$",
-            r"$s(x)=\frac{1}{\pi}\sin(\pi x)$",
+            r"$f(x)=\cos(2\pi x)$",
+            r"$s(x)=\frac{1}{2\pi}\sin(2\pi x)$",
             f_cos,
             s_cos,
         ),
-        (r"$f(x)=\sqrt{x}$", r"$s(x)=\frac{2}{3}x^{3/2}$", f_sqrt, s_sqrt),
+        (
+            r"$f(x)=-\frac{1}{(x+1)^2}$",
+            r"$s(x)=\frac{1}{x+1}-1$",
+            f_neg_inv_sq,
+            s_inv_shift,
+        ),
         (r"$f(x)=\tanh x$", r"$s(x)=\ln(\cosh x)$", f_tanh, s_tanh),
         (r"$f(x)=1/(1+x^2)$", r"$s(x)=\arctan x$", f_arctan_prime, s_arctan),
         (r"$f(x)=\mathrm{sech}^2 x$", r"$s(x)=\tanh x$", f_sech2, s_sech2),
