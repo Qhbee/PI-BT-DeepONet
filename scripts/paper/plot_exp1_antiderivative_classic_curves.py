@@ -301,6 +301,51 @@ def default_classic_cases() -> (
     def s_sech2(x: np.ndarray) -> np.ndarray:
         return np.tanh(x)
 
+    # --- 第四行：不光滑 / 分段（用于观察非光滑输入下的拟合）---
+    half = 0.5
+
+    def f_step_pm1(x: np.ndarray) -> np.ndarray:
+        """f(x)=sgn(x-1/2)：x<1/2 为 -1，x>1/2 为 +1；x=1/2 处与右段一致。"""
+        return np.where(x < half, -1.0, 1.0)
+
+    def s_tent_half_minus_abs(x: np.ndarray) -> np.ndarray:
+        """s(x)=|x-1/2|-1/2（倒 V / 谷形），s'=sgn(x-1/2)（除 x=1/2 外）；s(0)=s(1)=0。"""
+        return np.abs(x - half) - half
+
+    def f_abs_shift(x: np.ndarray) -> np.ndarray:
+        return np.abs(x - half)
+
+    def s_abs_shift(x: np.ndarray) -> np.ndarray:
+        return np.where(
+            x <= half,
+            half * x - 0.5 * x**2,
+            (1.0 / 8.0) + 0.5 * (x - half) ** 2,
+        )
+
+    t1, t2 = 1.0 / 3.0, 2.0 / 3.0
+
+    def f_piece3(x: np.ndarray) -> np.ndarray:
+        return np.where(x < t1, 1.0, np.where(x < t2, 0.0, -1.0))
+
+    def s_piece3(x: np.ndarray) -> np.ndarray:
+        return np.where(
+            x < t1,
+            x,
+            np.where(x < t2, t1, t1 - (x - t2)),
+        )
+
+    a_rect, b_rect = 0.25, 0.75
+
+    def f_rect_pulse(x: np.ndarray) -> np.ndarray:
+        return np.where((x >= a_rect) & (x <= b_rect), 1.0, 0.0)
+
+    def s_rect_pulse(x: np.ndarray) -> np.ndarray:
+        return np.where(
+            x < a_rect,
+            0.0,
+            np.where(x <= b_rect, x - a_rect, b_rect - a_rect),
+        )
+
     return [
         (r"$f(x)=1$", r"$s(x)=x$", f_one, s_one),
         (
@@ -344,6 +389,30 @@ def default_classic_cases() -> (
         (r"$f(x)=\tanh x$", r"$s(x)=\ln(\cosh x)$", f_tanh, s_tanh),
         (r"$f(x)=1/(1+x^2)$", r"$s(x)=\arctan x$", f_arctan_prime, s_arctan),
         (r"$f(x)=\mathrm{sech}^2 x$", r"$s(x)=\tanh x$", f_sech2, s_sech2),
+        (
+            r"$f(x)=\mathrm{sgn}(x-\frac{1}{2})$",
+            r"$s(x)=\left|x-\frac{1}{2}\right|-\frac{1}{2}$",
+            f_step_pm1,
+            s_tent_half_minus_abs,
+        ),
+        (
+            r"$f(x)=\left|x-\frac{1}{2}\right|$",
+            r"$s(x)=\int_0^x\left|t-\frac{1}{2}\right|\mathrm{d}t$",
+            f_abs_shift,
+            s_abs_shift,
+        ),
+        (
+            r"$f(x)$: $+1,\,0,\,-1$ on thirds of $[0,1]$",
+            r"$s(x)$: piecewise linear",
+            f_piece3,
+            s_piece3,
+        ),
+        (
+            r"$f(x)=\mathbf{1}_{[\frac{1}{4},\frac{3}{4}]}(x)$",
+            r"$s(x)$: trapezoid",
+            f_rect_pulse,
+            s_rect_pulse,
+        ),
     ]
 
 
@@ -468,7 +537,7 @@ def main() -> None:
     p.add_argument("--eval_mc_samples", type=int, default=None)
     p.add_argument("--out_dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--out_name", type=str, default=DEFAULT_OUT_NAME)
-    p.add_argument("--nrows", type=int, default=3)
+    p.add_argument("--nrows", type=int, default=4)
     p.add_argument("--ncols", type=int, default=4)
     p.add_argument("--max_panels", type=int, default=None, help="仅用前 K 个经典函数")
     p.add_argument("--no_cjk_font", action="store_true", help="总标题不用中文字体探测")
