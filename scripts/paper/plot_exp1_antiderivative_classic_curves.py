@@ -64,6 +64,10 @@ def _resolve_checkpoint(checkpoints_dir: Path, name: str | None) -> Path:
         if not c.exists():
             raise FileNotFoundError(f"Checkpoint not found: {c}")
         return c
+    # 训练器在早停结束后会将 best 写入 best.pt，并与 latest.pt 同步；旧 run 可能仅有按间隔存的 latest
+    best = checkpoints_dir / "best.pt"
+    if best.exists():
+        return best
     latest = checkpoints_dir / "latest.pt"
     if latest.exists():
         return latest
@@ -490,7 +494,7 @@ def run_plot(
         )
 
         ax.plot(x_query, s_true, color="red", lw=1.8, label="true $s(x)$")
-        ax.plot(x_query, s_pred, color="blue", lw=1.5, ls="--", label=r"pred $\hat{s}(x)$")
+        ax.plot(x_query, s_pred, color="blue", lw=1.2, ls="--", label=r"pred $\hat{s}(x)$")
         ax.set_title(f"{f_tex}\n{s_tex}", fontsize=9)
         ax.set_xlabel("$x$", fontsize=9)
         ax.set_ylabel("$s(x)$", fontsize=9)
@@ -533,7 +537,7 @@ def main() -> None:
     p.add_argument("--checkpoint", type=str, default=None, help="默认 latest.pt 或最后 epoch_*.pt")
     p.add_argument("--bayesian", action="store_true", help="加载 BayesianDeepONet checkpoint")
     p.add_argument("--n_query", type=int, default=200, help="查询点个数（稠密折线）")
-    p.add_argument("--dpi", type=int, default=150)
+    p.add_argument("--dpi", type=int, default=300)
     p.add_argument("--eval_mc_samples", type=int, default=None)
     p.add_argument("--out_dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument("--out_name", type=str, default=DEFAULT_OUT_NAME)
