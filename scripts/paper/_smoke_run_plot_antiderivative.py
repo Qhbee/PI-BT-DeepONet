@@ -1,4 +1,4 @@
-"""一次性：读取已有确定性 PI-DeepONet 权重为预训练，再 α-VI 训练 + 经典 f 曲线图（含 80\%/95\% MC 可信带）。
+"""一次性：读取已有确定性 PI-DeepONet 权重为预训练，再 α-VI 训练 + 经典 f 曲线图（画图脚本含 98\%/99\% MC 可信带）。
 
 默认：`checkpoints/best.pt` → 初始化贝叶斯 → 仅训练 `pi_b_deeponet`；画图脚本默认贝叶斯 + 可信带。
 无参运行：``uv run python scripts/paper/_smoke_run_plot_antiderivative.py``
@@ -30,8 +30,8 @@ DEFAULT_EARLY_STOP_PATIENCE = 25
 DEFAULT_PRETRAIN_PRIOR_SIGMA = 0.1
 # train_operator：α-VI 每个 batch 内对权重采样次数，用于 ELBO，与下面「验证/画图」抽样无关。
 DEFAULT_MC_SAMPLES_TRAIN = 3
-# train_operator：验证集 rel_l2 时的预测平均抽样数；写入 config；画图未传 --eval_mc_samples 时优先读 config。
-DEFAULT_EVAL_MC_SAMPLES = 200
+# train_operator：验证集 rel_l2 时的预测平均抽样数；写入 config.json 的 eval_mc_samples（仅训练用，与 plot 脚本 DEFAULT_EVAL_MC_SAMPLES 无关）。
+DEFAULT_TRAIN_EVAL_MC_SAMPLES = 200
 
 from src.data.generators.antiderivative import generate_antiderivative_data
 from src.models import (
@@ -156,7 +156,7 @@ def main() -> None:
         "transformer_dropout": 0.0,
         "prior_sigma": 1.0,
         "prior_sigma_pretrained": DEFAULT_PRETRAIN_PRIOR_SIGMA,
-        "eval_mc_samples": DEFAULT_EVAL_MC_SAMPLES,
+        "eval_mc_samples": DEFAULT_TRAIN_EVAL_MC_SAMPLES,
         "alpha": 1.0,
         "mc_samples": DEFAULT_MC_SAMPLES_TRAIN,
     }
@@ -257,8 +257,6 @@ def main() -> None:
         model_name,
         "--branch",
         "fnn",
-        "--eval_mc_samples",
-        str(cfg["eval_mc_samples"]),
         "--dpi",
         "150",
         "--out_dir",
