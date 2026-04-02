@@ -640,6 +640,23 @@ def train_operator(
         last_metrics["rel_l2"] = best_metric if early_stop_metric == "rel_l2" else last_metrics.get("rel_l2")
         last_metrics["test_mse"] = best_metric if early_stop_metric == "test_mse" else last_metrics.get("test_mse")
         print(f"  [EarlyStop] 恢复最佳 epoch {best_epoch}", flush=True)
+        if checkpoint_every > 0:
+            ckpt_best = {
+                "epoch": best_epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": last_metrics.get("loss"),
+                "rel_l2": last_metrics.get("rel_l2"),
+                "test_mse": last_metrics.get("test_mse"),
+                "rng_state": torch.get_rng_state(),
+                "np_rng": np.random.get_state(),
+                "py_rng": random.getstate(),
+                "seed": seed,
+            }
+            best_path = ckpt_dir / "best.pt"
+            torch.save(ckpt_best, best_path)
+            torch.save(ckpt_best, ckpt_dir / "latest.pt")
+            print(f"  [Checkpoint] 早停最佳权重 -> {best_path} 与 latest.pt", flush=True)
     writer.close()
     last_metrics["history"] = history
     return model, last_metrics

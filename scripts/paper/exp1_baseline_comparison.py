@@ -44,7 +44,7 @@ import torch
 # ---------- 训练 ----------
 #   epochs: 轮数上限。早停会提前结束；不早停则跑满。
 #   early_stop: 是否早停（基于 test rel_l2）。
-#   early_stop_patience: 连续 N epoch 无提升则停止（按 eval_every 间隔累计）。
+#   early_stop_patience: 早停阈值；每次验证未刷新 best 时计数 += eval_every（见 train_operator），非「纯 N 个 epoch」。
 #   batch_size: 每批样本数。总样本 = n_train * n_points_per_sample。
 #   lr: 学习率。
 #   pi_weight: PDE 残差项权重。0=纯数据拟合；>0 时加入物理约束。
