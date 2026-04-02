@@ -76,7 +76,7 @@
 \RequirePackage[top=25mm,left=25mm,bottom=25mm,right=20mm,footskip=10mm]{geometry}
 \setlength{\topskip}{10mm}
 \else
-\RequirePackage[top=45mm,left=35mm,bottom=40mm,right=30mm,headsep=20mm]{geometry}
+\RequirePackage[top=45mm,left=35mm,bottom=40mm,right=30mm,headsep=10mm]{geometry}
 \fi
 \RequirePackage{hyperref}
 \AtBeginDocument{
