@@ -12,6 +12,9 @@ dependencies = [
     "tensorboard",
     "matplotlib",
     "tqdm",
+    "pandas>=3.0.2",
+    "seaborn>=0.13.2",
+    "ipykernel>=7.2.0",
 ]
 
 [tool.uv]
