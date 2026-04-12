@@ -13,6 +13,8 @@
 \usepackage{subfigure}%子图http://www.ctex.org/documents/latex/graphics/node111.html
 \usepackage{chemfig}%化学式
 \usetikzlibrary{trees}
+% 参考文献引用样式：右上角方括号数字，如 ^[1]
+\setcitestyle{super,square,comma,sort&compress}
 % 浮动体（figure/table）尽量靠近正文（放宽默认每页浮动数量与面积限制）。
 % 减少图表被整体推到后面几页的情况；若仍有个别表图滞后，可对单处使用 [!htbp]。
 % --- 浮动体（figure/table）参数说明（与 cleveref 无关；cleveref 只管 \cref 等引用文案）---
@@ -117,7 +119,6 @@
 
 %参考文献
 \bibliographystyle{ref/rucbib}
-\setcitestyle{super,square,comma,sort&compress}
 \bibliography{ref/test}
 \nocite{*}
 \addcontentsline{toc}{chapter}{参考文献}
