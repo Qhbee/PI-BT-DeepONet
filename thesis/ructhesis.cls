@@ -248,21 +248,37 @@ text={\paperwidth,\paperheight},marginparwidth=0mm}\hspace{-9mm}
 \thispagestyle{empty}
 \includegraphics[width=\paperwidth-1mm ,totalheight=\paperheight-1mm]{#1}
 \restoregeometry}
+% 独创性声明与授权书签名：留空则保留下划线（可打印后手写）；填写扫描件路径则嵌入电子签名（建议透明底 PNG）。
+\newcommand{\AuthorSignatureFile}{}
+\newcommand{\SupervisorSignatureFile}{}
+% 签名栏：无图 / 有图 时「下划线」与周围文字行位置一致（与原版 \rule[-1ex]{30mm}{0.25pt} 相同）；
+% 有图时仅用 \raisebox[0pt][0pt] 叠在线上方，不改变 TeX 行高与拼版位置，可按需微调 \raisebox 第一个参数。
+\newcommand{\ruc@print@signline}[1]{%
+  \makebox[30mm][c]{%
+    \ifthenelse{\equal{#1}{}}%
+      {\rule[-1ex]{30mm}{0.25pt}}%
+      {\rlap{\makebox[30mm][c]{%
+          \raisebox{-0.2ex}[0pt][0pt]{\includegraphics[height=8mm,keepaspectratio]{#1}}%
+        }}%
+       \rule[-1ex]{30mm}{0.25pt}%
+      }%
+  }%
+}
 \newcommand{\originality}{
 \chapter*{\zihao{-2}\heiti 独创性声明}
 {\tt\zihao{-4}本人郑重声明：所呈交的论文是我个人在导师的指导下进行的研究工作及取得的研究成果。尽我所知，除了文中特别加以标注和致谢的地方外，论文中不包含其他人已经发表或撰写的研究成果，也不包含为获得中国人民大学或其他教育机构的学位或证书所使用过的材料。与我一同工作的同志对本研究所做的任何贡献均已在论文中作了明确的说明并表示了谢意。\par}
 \vskip 10mm\hfill
-论文作者：\rule[-1ex]{30mm}{0.25pt}\qquad
-日\qquad 期：\rule[-1ex]{30mm}{0.25pt}\par
+{论文作者：\ruc@print@signline{\AuthorSignatureFile}\qquad
+日\qquad 期：\underline{\makebox[50mm][l]{\@date}}\par}
 \vfil\centerline{\heiti\zihao{-2}关于论文使用授权的说明}
 \vskip 13mm
-{\tt 本人完全了解中国人民大学有关保留、使用学位论文的规定，即：学校有保留送交论文的复印件，允许论文被查阅和借阅；学校可以公布论文的全部或部分内容，可以采用影印、缩印或其他复制手段保存论文。\par
+{\tt 本人完全了解中国人民大学有关保留、使用学位论文的规定，即：学校有保留送交论文的复印件，允许论文被查阅和借阅；学校可以公布论文的全部或部分内容，可以采用影印、缩印或其他复制手段保存论文。\par}
 \vskip 10mm\hfill
-论文作者：\rule[-1ex]{30mm}{0.25pt}\qquad
-日\qquad 期：\rule[-1ex]{30mm}{0.25pt}\par
+{论文作者：\ruc@print@signline{\AuthorSignatureFile}\qquad
+日\qquad 期：\underline{\makebox[50mm][l]{\@date}}\par}
 \hfill \rule[0mm]{0mm}{8mm}
-指导老师：\rule[-1ex]{30mm}{0.25pt}\qquad
-日\qquad 期：\rule[-1ex]{30mm}{0.25pt}\par}
+{指导老师：\ruc@print@signline{\SupervisorSignatureFile}\qquad
+日\qquad 期：\underline{\makebox[50mm][l]{\@date}}\par}
 \thispagestyle{empty}
 }
 \setcounter{secnumdepth}{4}
