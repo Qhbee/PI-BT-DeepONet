@@ -392,7 +392,11 @@ subsubsection/numberformat = \bf\zihao{5}
 \definecolor{rucgreen}{rgb}{0.333,0.608,0.627}
 \definecolor{rucwhite}{rgb}{0.999,0.999,0.999}
 \definecolor{rucbalck}{rgb}{0,0,0}
-\setCJKfamilyfont{X}{FZXBSJW--GB1-0}
+\IfFontExistsTF{FZXBSJW--GB1-0}{%
+  \setCJKfamilyfont{X}{FZXBSJW--GB1-0}%
+}{%
+  \setCJKfamilyfont{X}{SimHei}%
+}
 \newcommand{\X}{\CJKfamily{X}}
 \newcommand{\cover}{
 \newgeometry{top=0mm,left=20mm,bottom=0mm,right=0mm,voffset=10mm,columnsep=5.5cm}
