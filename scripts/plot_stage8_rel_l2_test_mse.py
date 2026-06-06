@@ -92,7 +92,7 @@ def plot_grouped_bars(
     ax.set_xticklabels(labels)
     ax.set_ylabel("RelL2", color=COLOR_REL_L2_EDGE)
     ax.tick_params(axis="y", labelcolor=COLOR_REL_L2_EDGE)
-    ax.set_title("Stage 8: Trunk extension (RelL2 & TestMSE)")
+    ax.set_title("Trunk extension Comparison (RelL2 & TestMSE)")
     ax.grid(True, axis="y", alpha=0.35, linestyle="--", zorder=0)
 
     ax2 = ax.twinx()
