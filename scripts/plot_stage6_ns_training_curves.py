@@ -107,7 +107,7 @@ def plot_ns_grid(stage6_dir: Path, out_path: Path) -> None:
             show_legend=(col == 2),
         )
 
-    fig.suptitle("Navier-Stokes（stage6）：Kovasznay / Beltrami 训练曲线", fontsize=12, y=1.01)
+    fig.suptitle("Navier-Stokes：Kovasznay / Beltrami 训练曲线", fontsize=12, y=1.01)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
